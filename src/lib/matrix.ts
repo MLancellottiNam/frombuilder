@@ -1,5 +1,8 @@
 import Papa from 'papaparse';
-import type { FieldType, SourceField } from '../types';
+import { nanoid } from 'nanoid';
+import type { Field, FieldType, IdConvention, Section, SourceField, Subsection } from '../types';
+import { fieldFromSource, newUiField } from './factory';
+import { serializeCondition } from './conditions';
 
 // ---------------------------------------------------------------------------
 // Import de "ficha/matriz": una planilla (CSV o xlsx) que describe cómo debería
@@ -274,4 +277,133 @@ export function readMatrix(table: Table, mapping: MatrixMapping): MatrixResult {
       duplicates: Object.keys(duplicates).length,
     },
   };
+}
+
+export interface MaterializeResult {
+  sections: Section[];
+  sourceFields: SourceField[];
+  /** duplicate rows skipped to keep field ids unique */
+  skipped: number;
+  /** conditions successfully turned into conditionalVisibility */
+  conditionsApplied: number;
+}
+
+/**
+ * Etapa 1 — build the whole ordered tree with fields already placed inside their
+ * sections/subsections (no pool). Duplicate ids are skipped (first wins).
+ * Conditions are resolved to real field ids and written as conditionalVisibility
+ * when the referenced field can be matched unambiguously.
+ */
+export function materializeMatrix(result: MatrixResult, convention: IdConvention): MaterializeResult {
+  const sections: Section[] = [];
+  const sectionByTitle = new Map<string, Section>();
+  const subByKey = new Map<string, Subsection>();
+  const orderCounters = new Map<string, number>();
+  const usedIds = new Set<string>();
+
+  const sourceFields: SourceField[] = [];
+  const seenSource = new Set<string>();
+
+  // Lookups to resolve condition refs -> field id (filled as we create fields).
+  const bySourceName = new Map<string, string>();
+  const byLabel = new Map<string, string>();
+  // Deferred conditions: entry.condition + created field, resolved in pass 2.
+  const pending: { field: Field; ref: string; value: string; negated: boolean }[] = [];
+
+  let skipped = 0;
+
+  for (const e of result.entries) {
+    const sectionTitle = e.section;
+    let section = sectionByTitle.get(sectionTitle);
+    if (!section) {
+      section = {
+        id: 'section_' + nanoid(8),
+        title: sectionTitle,
+        description: null,
+        instructions: null,
+        conditionalVisibility: null,
+        order: sections.length + 1,
+        hidden: null,
+        fields: [],
+        subsections: [],
+        childrenOrder: [],
+      };
+      sections.push(section);
+      sectionByTitle.set(sectionTitle, section);
+    }
+
+    const subKey = section.id + '||' + e.subsection;
+    let sub = subByKey.get(subKey);
+    if (!sub) {
+      sub = {
+        id: 'sub_' + nanoid(8),
+        title: e.subsection,
+        description: null,
+        instructions: null,
+        conditionalVisibility: null,
+        hidden: null,
+        order: section.subsections.length + 1,
+        fields: [],
+      };
+      section.subsections.push(sub);
+      section.childrenOrder.push({ kind: 'subsection', id: sub.id });
+      subByKey.set(subKey, sub);
+    }
+
+    const order = (orderCounters.get(sub.id) ?? 0) + 1;
+
+    const src: SourceField = {
+      sourceName: e.sourceName ?? `__ui_${e.globalIndex}__`,
+      nativeType: e.typeRaw || undefined,
+      label: e.label,
+      suggestedType: e.type ?? undefined,
+      suggestedPath: e.path || undefined,
+      isUiOnly: !e.sourceName,
+    };
+    const field = e.sourceName
+      ? fieldFromSource(src, convention, order)
+      : (() => {
+          const f = newUiField(order, e.type ?? 'text');
+          f.label = e.label;
+          if (e.path) {
+            f.salidaJSON = e.path;
+            f.jsonOutputPath = e.path;
+          }
+          return f;
+        })();
+
+    if (usedIds.has(field.id)) {
+      skipped++;
+      continue; // duplicate -> keep ids unique
+    }
+    usedIds.add(field.id);
+    orderCounters.set(sub.id, order);
+    sub.fields.push(field);
+
+    if (e.sourceName) bySourceName.set(e.sourceName, field.id);
+    byLabel.set(norm(e.label), field.id);
+    if (e.sourceName && !seenSource.has(e.sourceName)) {
+      seenSource.add(e.sourceName);
+      sourceFields.push(src);
+    }
+    if (e.condition) {
+      pending.push({ field, ref: e.condition.ref, value: e.condition.value, negated: e.condition.negated });
+    }
+  }
+
+  // Pass 2: resolve conditions to conditionalVisibility.
+  let conditionsApplied = 0;
+  for (const p of pending) {
+    const targetId = bySourceName.get(p.ref) ?? byLabel.get(norm(p.ref));
+    if (!targetId) continue;
+    const operator = p.value ? 'equals' : p.negated ? 'empty' : 'not_empty';
+    const serialized = serializeCondition({
+      logic: 'and',
+      conditions: [{ fieldId: targetId, operator, ...(p.value ? { value: p.value } : {}) }],
+    });
+    p.field.conditionalVisibility = serialized;
+    conditionsApplied++;
+  }
+
+  return { sections, sourceFields, skipped, conditionsApplied };
 }
