@@ -37,6 +37,8 @@ interface StoreState {
 
   // --- Etapa 2: PDF binding ---
   loadAcroForms: (list: AcroField[]) => void;
+  /** Preserve the Signframe _sourcePdf ground-truth so export keeps it. */
+  setSourcePdfMeta: (sp: unknown) => void;
   setPdf: (url: string | null, name: string | null) => void;
   /** Assign (or clear with null) the real PDF sourceName of a field; rewrites refs. Returns false on id collision. */
   assignSourceName: (fieldId: string, acroName: string | null) => boolean;
@@ -176,6 +178,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
   loadAcroForms: (list) =>
     set((state) => ({ project: { ...state.project, acroForms: list } })),
+
+  setSourcePdfMeta: (sp) =>
+    set((state) => ({ project: { ...state.project, form: { ...state.project.form, _sourcePdf: sp } } })),
 
   setPdf: (url, name) => set({ pdfUrl: url, pdfName: name }),
 
