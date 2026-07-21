@@ -52,6 +52,20 @@ para un segundo momento. Las columnas se mapean a mano (se auto-detectan por
 nombre) y soporta forward-fill: si la sección solo aparece en la primera fila del
 grupo, se arrastra a las siguientes.
 
+#### Explorar matriz (entenderla antes de armar)
+
+Desde el importador, **Explorar en detalle** abre una vista de solo lectura para
+entender la ficha sin tocar nada:
+
+- **Orden** tal como viene la matriz (Sección → Subsección → campos numerados).
+- **Duplicados**: marca los campos que aparecen más de una vez (`×N`), tanto por
+  `sourceName` como por label.
+- **Ramas Sí/No**: si mapeás una columna de *Condición* (p. ej. `Campo = Sí`), un
+  simulador te deja elegir respuestas y ver en vivo **qué campos aparecen y cuáles
+  se ocultan** (“qué sale si dice Sí / qué pasa si dice No”). El parser de
+  condiciones es tolerante: acepta `=`, `:`, `es`, `vale`, prefijos como “si …” y
+  frases negativas, y siempre muestra el texto crudo de la condición.
+
 ## Regla de Oro
 
 Los campos que pintan el PDF llevan `sourceMeta` y su `id` es inmutable, con
