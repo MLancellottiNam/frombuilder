@@ -97,7 +97,7 @@ export default function TopBar() {
         <input
           ref={acroInput}
           type="file"
-          accept=".csv,.txt,.xlsx,.xls"
+          accept=".csv,.txt,.xlsx,.xls,.json"
           hidden
           onChange={() => {
             const f = acroInput.current?.files?.[0];
@@ -125,8 +125,8 @@ export default function TopBar() {
         <Button onClick={() => matrixInput.current?.click()} title="Importar ficha/matriz (CSV o xlsx)">
           <Table2 size={15} /> Matriz
         </Button>
-        <Button onClick={() => acroInput.current?.click()} title="Importar lista de AcroForms del PDF (CSV/xlsx)">
-          <ListChecks size={15} /> AcroForms{project.acroForms.length > 0 ? ` (${project.acroForms.length})` : ''}
+        <Button onClick={() => acroInput.current?.click()} title="Importar JSON de Signframe o lista de AcroForms (CSV/xlsx)">
+          <ListChecks size={15} /> Campos PDF{project.acroForms.length > 0 ? ` (${project.acroForms.length})` : ''}
         </Button>
         <Button onClick={() => pdfInput.current?.click()} title={pdfName ?? 'Adjuntar PDF de referencia'}>
           <FileText size={15} /> PDF{pdfName ? ' ✓' : ''}

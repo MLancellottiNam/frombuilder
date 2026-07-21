@@ -202,11 +202,13 @@ export const useStore = create<StoreState>((set, get) => ({
     }
 
     const acro = state.project.acroForms.find((a) => a.name === acroName);
-    const newId = fieldIdFor(acroName, state.project.idConvention);
+    // Prefer the authoritative id + sourceMeta from the Signframe main JSON so
+    // values render correctly; otherwise derive them (Regla de Oro).
+    const newId = acro?.id ?? fieldIdFor(acroName, state.project.idConvention);
     const ids = allFieldIds(form);
     if (newId !== fieldId && ids.has(newId)) return false; // would duplicate an id
 
-    const sourceMeta: Record<string, unknown> = {
+    const sourceMeta = acro?.sourceMeta ?? {
       sourceName: acroName,
       ...(acro?.page != null ? { page: acro.page } : {}),
     };

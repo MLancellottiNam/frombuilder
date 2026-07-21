@@ -1,20 +1,38 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Modal, Field, Select, Button } from './ui';
 import { parseTable, type Table } from '../lib/matrix';
+import { extractAcroFromForm } from '../lib/matching';
 import { useStore } from '../store/store';
 import type { AcroField } from '../types';
 
 const none = '(ninguna)';
 
-/** Import the real AcroForm field list (xlsx/CSV) — the PDF sourceName universe. */
+/**
+ * Import the PDF field universe. Accepts either a Signframe "main" JSON (the
+ * auto-mapped PDF import, with real sourceMeta per field) or an xlsx/CSV list
+ * of AcroForm names.
+ */
 export default function AcroFormsImportDialog({ file, onClose }: { file: File; onClose: () => void }) {
   const loadAcroForms = useStore((s) => s.loadAcroForms);
   const [table, setTable] = useState<Table | null>(null);
+  const [jsonList, setJsonList] = useState<AcroField[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nameCol, setNameCol] = useState('');
   const [pageCol, setPageCol] = useState<string | undefined>(undefined);
+  const isJson = file.name.toLowerCase().endsWith('.json');
 
   useEffect(() => {
+    if (isJson) {
+      file
+        .text()
+        .then((t) => {
+          const acro = extractAcroFromForm(JSON.parse(t));
+          if (acro.length === 0) throw new Error('el JSON no tiene campos con sourceMeta');
+          setJsonList(acro);
+        })
+        .catch((e) => setError(String(e)));
+      return;
+    }
     parseTable(file)
       .then((t) => {
         setTable(t);
@@ -23,9 +41,10 @@ export default function AcroFormsImportDialog({ file, onClose }: { file: File; o
         setNameCol(guess);
       })
       .catch((e) => setError(String(e)));
-  }, [file]);
+  }, [file, isJson]);
 
   const list = useMemo<AcroField[]>(() => {
+    if (isJson) return jsonList ?? [];
     if (!table || !nameCol) return [];
     const seen = new Set<string>();
     const out: AcroField[] = [];
@@ -50,42 +69,53 @@ export default function AcroFormsImportDialog({ file, onClose }: { file: File; o
       </Modal>
     );
   }
-  if (!table) {
+  if (!isJson && !table) {
     return (
-      <Modal title="Importar AcroForms del PDF" onClose={onClose}>
+      <Modal title="Importar campos del PDF" onClose={onClose}>
         <p className="text-sm text-slate-500">Leyendo…</p>
       </Modal>
     );
   }
 
   return (
-    <Modal title="Importar AcroForms del PDF" onClose={onClose}>
-      <p className="text-xs text-slate-500 mb-3">
-        La lista real de campos del PDF (p. ej. la columna <code>AcroForm Actual</code>). Se usa para vincular cada
-        campo de la matriz con su <code>sourceName</code> real.
-      </p>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Columna con el nombre (sourceName)">
-          <Select value={nameCol} onChange={(e) => setNameCol(e.target.value)}>
-            {table.headers.map((h) => (
-              <option key={h} value={h}>
-                {h}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        <Field label="Columna página (opcional)">
-          <Select value={pageCol ?? none} onChange={(e) => setPageCol(e.target.value === none ? undefined : e.target.value)}>
-            <option>{none}</option>
-            {table.headers.map((h) => (
-              <option key={h} value={h}>
-                {h}
-              </option>
-            ))}
-          </Select>
-        </Field>
+    <Modal title="Importar campos del PDF" onClose={onClose}>
+      {isJson ? (
+        <p className="text-xs text-slate-500 mb-3">
+          JSON auto-mapeado de <b>Signframe</b>: se toma el <code>sourceMeta</code> real de cada campo (para que los
+          valores rendericen bien) y su <code>id</code> autoritativo al vincular.
+        </p>
+      ) : (
+        <p className="text-xs text-slate-500 mb-3">
+          Lista de campos del PDF (p. ej. la columna <code>AcroForm Actual</code>). Al vincular se fabrica un
+          <code>sourceMeta</code> básico; para rendering exacto, importá el JSON de Signframe.
+        </p>
+      )}
+      {!isJson && table && (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Columna con el nombre (sourceName)">
+            <Select value={nameCol} onChange={(e) => setNameCol(e.target.value)}>
+              {table.headers.map((h) => (
+                <option key={h} value={h}>
+                  {h}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Columna página (opcional)">
+            <Select value={pageCol ?? none} onChange={(e) => setPageCol(e.target.value === none ? undefined : e.target.value)}>
+              <option>{none}</option>
+              {table.headers.map((h) => (
+                <option key={h} value={h}>
+                  {h}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+      )}
+      <div className="mt-2 text-xs text-slate-500">
+        {list.length} campos detectados{isJson ? ' (con sourceMeta real)' : ''}.
       </div>
-      <div className="mt-2 text-xs text-slate-500">{list.length} AcroForms detectados.</div>
       <div className="max-h-40 overflow-y-auto scroll-thin border border-slate-200 rounded mt-1 text-sm">
         {list.slice(0, 80).map((a) => (
           <div key={a.name} className="px-2 py-0.5 font-mono text-slate-600 border-b border-slate-50">
