@@ -205,10 +205,17 @@ export interface SourceField {
   isUiOnly?: boolean;
 }
 
+/** A real AcroForm field name extracted from the PDF (the sourceName universe). */
+export interface AcroField {
+  name: string;
+  page?: number;
+}
+
 export interface Project {
   name: string;
   sourceFields: SourceField[];
   idConvention: IdConvention;
   form: FormDefinition;
   pool: string[]; // sourceNames not yet placed
+  acroForms: AcroField[]; // real PDF field names for Etapa 2 (binding)
 }

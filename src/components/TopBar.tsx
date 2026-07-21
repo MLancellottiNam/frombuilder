@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Upload, FileJson, Download, Save, FolderOpen, ShieldCheck, ShieldAlert, Table2 } from 'lucide-react';
+import { Upload, FileJson, Download, Save, FolderOpen, ShieldCheck, ShieldAlert, Table2, FileText, ListChecks, Link2 } from 'lucide-react';
 import { useStore } from '../store/store';
 import { runValidations, errorCount } from '../lib/validation';
 import { buildExport, downloadJson, slugify } from '../lib/exporter';
@@ -7,6 +7,8 @@ import type { FormDefinition, Project } from '../types';
 import { Button } from './ui';
 import CsvImportDialog from './CsvImportDialog';
 import MatrixImportDialog from './MatrixImportDialog';
+import AcroFormsImportDialog from './AcroFormsImportDialog';
+import UnirDialog from './UnirDialog';
 import ValidationPanel from './ValidationPanel';
 
 export default function TopBar() {
@@ -14,13 +16,19 @@ export default function TopBar() {
   const importForm = useStore((s) => s.importForm);
   const loadProject = useStore((s) => s.loadProject);
   const setProjectName = useStore((s) => s.setProjectName);
+  const setPdf = useStore((s) => s.setPdf);
+  const pdfName = useStore((s) => s.pdfName);
 
   const csvInput = useRef<HTMLInputElement>(null);
   const matrixInput = useRef<HTMLInputElement>(null);
+  const acroInput = useRef<HTMLInputElement>(null);
+  const pdfInput = useRef<HTMLInputElement>(null);
   const jsonInput = useRef<HTMLInputElement>(null);
   const projectInput = useRef<HTMLInputElement>(null);
   const [csvText, setCsvText] = useState<string | null>(null);
   const [matrixFile, setMatrixFile] = useState<File | null>(null);
+  const [acroFile, setAcroFile] = useState<File | null>(null);
+  const [showUnir, setShowUnir] = useState(false);
   const [showValidation, setShowValidation] = useState(false);
 
   const errors = errorCount(runValidations(project));
@@ -86,6 +94,28 @@ export default function TopBar() {
             if (matrixInput.current) matrixInput.current.value = '';
           }}
         />
+        <input
+          ref={acroInput}
+          type="file"
+          accept=".csv,.txt,.xlsx,.xls"
+          hidden
+          onChange={() => {
+            const f = acroInput.current?.files?.[0];
+            if (f) setAcroFile(f);
+            if (acroInput.current) acroInput.current.value = '';
+          }}
+        />
+        <input
+          ref={pdfInput}
+          type="file"
+          accept="application/pdf,.pdf"
+          hidden
+          onChange={() => {
+            const f = pdfInput.current?.files?.[0];
+            if (f) setPdf(URL.createObjectURL(f), f.name);
+            if (pdfInput.current) pdfInput.current.value = '';
+          }}
+        />
         <input ref={jsonInput} type="file" accept=".json" hidden onChange={() => readFile(jsonInput.current, onImportJson)} />
         <input ref={projectInput} type="file" accept=".json" hidden onChange={() => readFile(projectInput.current, onLoadProject)} />
 
@@ -94,6 +124,15 @@ export default function TopBar() {
         </Button>
         <Button onClick={() => matrixInput.current?.click()} title="Importar ficha/matriz (CSV o xlsx)">
           <Table2 size={15} /> Matriz
+        </Button>
+        <Button onClick={() => acroInput.current?.click()} title="Importar lista de AcroForms del PDF (CSV/xlsx)">
+          <ListChecks size={15} /> AcroForms{project.acroForms.length > 0 ? ` (${project.acroForms.length})` : ''}
+        </Button>
+        <Button onClick={() => pdfInput.current?.click()} title={pdfName ?? 'Adjuntar PDF de referencia'}>
+          <FileText size={15} /> PDF{pdfName ? ' ✓' : ''}
+        </Button>
+        <Button onClick={() => setShowUnir(true)} title="Etapa 2: vincular campos con el PDF">
+          <Link2 size={15} /> Unir
         </Button>
         <Button onClick={() => jsonInput.current?.click()}>
           <FileJson size={15} /> Importar JSON
@@ -122,6 +161,8 @@ export default function TopBar() {
 
       {csvText !== null && <CsvImportDialog text={csvText} onClose={() => setCsvText(null)} />}
       {matrixFile && <MatrixImportDialog file={matrixFile} onClose={() => setMatrixFile(null)} />}
+      {acroFile && <AcroFormsImportDialog file={acroFile} onClose={() => setAcroFile(null)} />}
+      {showUnir && <UnirDialog onClose={() => setShowUnir(false)} />}
       {showValidation && <ValidationPanel onClose={() => setShowValidation(false)} />}
     </>
   );

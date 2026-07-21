@@ -25,7 +25,7 @@ const WIDTH_LABEL: Record<string, string> = {
   fit: 'fit',
 };
 
-function FieldCard({ field, subsectionId }: { field: Field; subsectionId: string }) {
+function FieldCard({ field, subsectionId, option }: { field: Field; subsectionId: string; option?: boolean }) {
   const selection = useStore((s) => s.selection);
   const select = useStore((s) => s.select);
   const removeField = useStore((s) => s.removeField);
@@ -55,7 +55,11 @@ function FieldCard({ field, subsectionId }: { field: Field; subsectionId: string
       >
         <GripVertical size={15} />
       </button>
-      <span className="text-[10px] font-semibold uppercase text-slate-400 w-14 shrink-0">{field.type}</span>
+      {option ? (
+        <span className="text-indigo-300 shrink-0 text-xs">◦</span>
+      ) : (
+        <span className="text-[10px] font-semibold uppercase text-slate-400 w-14 shrink-0">{field.type}</span>
+      )}
       <span className="flex-1 truncate text-slate-700">{field.label || <em className="text-slate-400">sin label</em>}</span>
       <span className="text-[10px] text-slate-400 shrink-0">{WIDTH_LABEL[field.width]}</span>
       {isSource ? (
@@ -76,6 +80,57 @@ function FieldCard({ field, subsectionId }: { field: Field; subsectionId: string
       >
         <Trash2 size={14} />
       </button>
+    </div>
+  );
+}
+
+type RenderItem =
+  | { kind: 'field'; field: Field }
+  | { kind: 'group'; label: string; fields: Field[] };
+
+/** Group contiguous fields that share a radioGroupLabel into one question block. */
+function groupFields(fields: Field[]): RenderItem[] {
+  const out: RenderItem[] = [];
+  for (const f of fields) {
+    const last = out[out.length - 1];
+    if (f.radioGroupLabel) {
+      if (last && last.kind === 'group' && last.label === f.radioGroupLabel) {
+        last.fields.push(f);
+      } else {
+        out.push({ kind: 'group', label: f.radioGroupLabel, fields: [f] });
+      }
+    } else {
+      out.push({ kind: 'field', field: f });
+    }
+  }
+  return out;
+}
+
+/** A desdoblado question rendered compartmentalized: title + nested options. */
+function RadioGroupBlock({ label, fields, subsectionId }: { label: string; fields: Field[]; subsectionId: string }) {
+  const collapsed = useStore((s) => s.collapsed['rg:' + subsectionId + ':' + label]);
+  const toggleCollapse = useStore((s) => s.toggleCollapse);
+  const key = 'rg:' + subsectionId + ':' + label;
+  const bound = fields.filter((f) => f.sourceMeta).length;
+  return (
+    <div className="mb-1 rounded-md border border-indigo-200 bg-indigo-50/40">
+      <div className="flex items-center gap-2 px-2 py-1">
+        <button onClick={() => toggleCollapse(key)} className="text-indigo-400 hover:text-indigo-600">
+          {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+        </button>
+        <span className="flex-1 truncate text-sm font-medium text-indigo-900">{label}</span>
+        <span className="text-[10px] bg-indigo-100 text-indigo-700 rounded px-1 shrink-0">{fields.length} opciones</span>
+        <span className="text-[10px] text-slate-400 shrink-0">
+          {bound}/{fields.length} PDF
+        </span>
+      </div>
+      {!collapsed && (
+        <div className="px-1.5 pb-1.5">
+          {fields.map((f) => (
+            <FieldCard key={f.id} field={f} subsectionId={subsectionId} option />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -137,9 +192,13 @@ function SubsectionNode({ subsection }: { subsection: Subsection }) {
           className={`px-2 pb-2 min-h-[40px] rounded-b-md transition-colors ${isOver ? 'bg-brand-50' : ''}`}
         >
           <SortableContext items={subsection.fields.map((f) => `field:${f.id}`)} strategy={verticalListSortingStrategy}>
-            {subsection.fields.map((f) => (
-              <FieldCard key={f.id} field={f} subsectionId={subsection.id} />
-            ))}
+            {groupFields(subsection.fields).map((item, i) =>
+              item.kind === 'group' ? (
+                <RadioGroupBlock key={`g${i}`} label={item.label} fields={item.fields} subsectionId={subsection.id} />
+              ) : (
+                <FieldCard key={item.field.id} field={item.field} subsectionId={subsection.id} />
+              ),
+            )}
           </SortableContext>
           {subsection.fields.length === 0 && (
             <p className="text-[11px] text-slate-400 text-center py-3 border border-dashed border-slate-200 rounded">
