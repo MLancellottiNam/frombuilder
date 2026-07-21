@@ -39,6 +39,8 @@ function baseField(id: string, label: string, type: FieldType, order: number): F
     prefillKey: null,
     salidaJSON: null,
     jsonOutputPath: null,
+    salidaJSONSecundaria: null,
+    jsonValueSecundario: null,
     excludeFromJson: false,
     conditionalVisibility: null,
     conditionalRequired: null,
@@ -87,6 +89,19 @@ export function fieldFromSource(
   return f;
 }
 
+/**
+ * A col-M cell can carry two destinations ("código, descripción"). Split into
+ * primary + secondary so we never emit an invalid comma-joined path.
+ */
+export function splitPath(raw: string | null | undefined): { primary: string | null; secondary: string | null } {
+  if (!raw) return { primary: null, secondary: null };
+  const parts = raw
+    .split(/\s*[,;]\s*|\s+\/\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return { primary: parts[0] ?? null, secondary: parts[1] ?? null };
+}
+
 /** Pre-fill type/path from the matrix suggestions (drag-time convenience). */
 function applySuggestions(f: Field, src: SourceField): void {
   if (src.suggestedType) {
@@ -94,8 +109,10 @@ function applySuggestions(f: Field, src: SourceField): void {
     if (f.type === 'checkbox' && f.sourceMeta) f.checkedPdfValue = true;
   }
   if (src.suggestedPath) {
-    f.salidaJSON = src.suggestedPath;
-    f.jsonOutputPath = src.suggestedPath;
+    const { primary, secondary } = splitPath(src.suggestedPath);
+    f.salidaJSON = primary;
+    f.jsonOutputPath = primary;
+    f.salidaJSONSecundaria = secondary;
   }
 }
 

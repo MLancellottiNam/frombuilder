@@ -14,8 +14,10 @@ const none = '(ninguna)';
  */
 export default function AcroFormsImportDialog({ file, onClose }: { file: File; onClose: () => void }) {
   const loadAcroForms = useStore((s) => s.loadAcroForms);
+  const setSourcePdfMeta = useStore((s) => s.setSourcePdfMeta);
   const [table, setTable] = useState<Table | null>(null);
   const [jsonList, setJsonList] = useState<AcroField[] | null>(null);
+  const [sourcePdf, setSourcePdf] = useState<unknown>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [nameCol, setNameCol] = useState('');
   const [pageCol, setPageCol] = useState<string | undefined>(undefined);
@@ -26,9 +28,11 @@ export default function AcroFormsImportDialog({ file, onClose }: { file: File; o
       file
         .text()
         .then((t) => {
-          const acro = extractAcroFromForm(JSON.parse(t));
+          const parsed = JSON.parse(t);
+          const acro = extractAcroFromForm(parsed);
           if (acro.length === 0) throw new Error('el JSON no tiene campos con sourceMeta');
           setJsonList(acro);
+          if (parsed && parsed._sourcePdf !== undefined) setSourcePdf(parsed._sourcePdf);
         })
         .catch((e) => setError(String(e)));
       return;
@@ -131,6 +135,7 @@ export default function AcroFormsImportDialog({ file, onClose }: { file: File; o
           disabled={list.length === 0}
           onClick={() => {
             loadAcroForms(list);
+            if (sourcePdf !== undefined) setSourcePdfMeta(sourcePdf);
             onClose();
           }}
         >
