@@ -1,7 +1,7 @@
 import Papa from 'papaparse';
 import { nanoid } from 'nanoid';
 import type { Condition, Field, FieldType, IdConvention, Section, SourceField, Subsection } from '../types';
-import { fieldFromSource, newUiField } from './factory';
+import { fieldFromSource, newUiField, splitPath } from './factory';
 import { parseCondition, serializeCondition } from './conditions';
 
 // ---------------------------------------------------------------------------
@@ -466,8 +466,11 @@ export function materializeMatrix(
       ? fieldFromSource(src, convention, 1)
       : newUiField(1, asOption ? 'radio' : e.type ?? 'text');
     field.label = asOption ? e.value || e.label : e.label;
-    field.salidaJSON = e.path || null;
-    field.jsonOutputPath = e.path || null;
+    // col M puede traer dos destinos ("código, descripción") -> primario/secundario.
+    const { primary, secondary } = splitPath(e.path);
+    field.salidaJSON = primary;
+    field.jsonOutputPath = primary;
+    field.salidaJSONSecundaria = secondary;
     field.required = e.required;
     field.readOnly = e.readOnly;
     field.hidden = e.hidden ? true : null;

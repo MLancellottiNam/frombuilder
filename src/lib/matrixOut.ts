@@ -59,7 +59,7 @@ export function formToMatrixRows(project: Project): Record<string, string>[] {
           'Regla': ruleText(f),
           'Obligatorio': f.required ? 'Si' : '',
           'Visualización en Formularios': visualization(f),
-          'Nombre del campo en el JSON': f.salidaJSON ?? '',
+          'Nombre del campo en el JSON': [f.salidaJSON, f.salidaJSONSecundaria].filter(Boolean).join(', '),
           'Nombre del campo en el PDF': sourceNameOf(f),
           id: f.id,
         });

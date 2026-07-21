@@ -130,6 +130,8 @@ export interface Field {
   prefillKey: string | null;
   salidaJSON: string | null;
   jsonOutputPath: string | null;
+  salidaJSONSecundaria: string | null; // 2do path (ej. código + descripción)
+  jsonValueSecundario: unknown;
   excludeFromJson: boolean;
   conditionalVisibility: string | null;
   conditionalRequired: string | null;

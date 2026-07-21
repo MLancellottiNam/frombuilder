@@ -77,6 +77,17 @@ function FieldInspector({ field }: { field: Field }) {
         />
       </FieldRow>
 
+      {(field.salidaJSONSecundaria || field.type === 'select' || field.type === 'radio') && (
+        <FieldRow label="salidaJSONSecundaria (2do path: descripción)" hint="Ej. código en salidaJSON + descripción acá.">
+          <TextInput
+            value={field.salidaJSONSecundaria ?? ''}
+            onChange={(e) => set({ salidaJSONSecundaria: e.target.value || null })}
+            placeholder="p.ej. encabezado.descripcionTipoTramite"
+            className="font-mono"
+          />
+        </FieldRow>
+      )}
+
       {field.type === 'checkbox' && (
         <FieldRow label="checkedPdfValue" hint="Para campos del PDF debe ser true (nunca 'X').">
           <Select
