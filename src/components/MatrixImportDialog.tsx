@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Layers, Columns3, FolderTree } from 'lucide-react';
+import { Layers, Columns3, FolderTree, Search, Copy } from 'lucide-react';
 import { Modal, Field, Select, Button, Checkbox } from './ui';
 import { parseTable, guessMatrixMapping, readMatrix, type Table, type MatrixMapping } from '../lib/matrix';
 import { detectConvention } from '../lib/idConvention';
 import { useStore } from '../store/store';
 import type { IdConvention } from '../types';
+import MatrixExplorer from './MatrixExplorer';
 
 const none = '(ninguna)';
 
@@ -17,6 +18,7 @@ export default function MatrixImportDialog({ file, onClose }: { file: File; onCl
   const [mapping, setMapping] = useState<MatrixMapping>({});
   const [convention, setConvention] = useState<IdConvention>('exact');
   const [createStructure, setCreateStructure] = useState(true);
+  const [showExplorer, setShowExplorer] = useState(false);
 
   useEffect(() => {
     parseTable(file)
@@ -79,7 +81,7 @@ export default function MatrixImportDialog({ file, onClose }: { file: File; onCl
           { icon: Columns3, n: result.stats.columns, l: 'columnas' },
           { icon: FolderTree, n: result.stats.sections, l: 'secciones' },
           { icon: Layers, n: result.stats.subsections, l: 'subsecciones' },
-          { icon: Layers, n: result.stats.fields, l: 'campos' },
+          { icon: Layers, n: result.stats.rows, l: 'filas / campos' },
         ].map((c, i) => (
           <div key={i} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-center">
             <c.icon size={15} className="mx-auto text-brand-600 mb-0.5" />
@@ -101,6 +103,21 @@ export default function MatrixImportDialog({ file, onClose }: { file: File; onCl
         {colSelect('label', 'Columna Label')}
         {colSelect('type', 'Columna Tipo')}
         {colSelect('path', 'Columna Path (salidaJSON)')}
+        {colSelect('condition', 'Columna Condición (Sí/No)')}
+      </div>
+
+      {/* Aviso de duplicados + explorador */}
+      <div className="flex items-center justify-between mt-1 mb-2">
+        {result.stats.duplicates > 0 ? (
+          <span className="inline-flex items-center gap-1 text-xs text-amber-700">
+            <Copy size={13} /> {result.stats.duplicates} campo(s) repetido(s)
+          </span>
+        ) : (
+          <span className="text-xs text-green-600">Sin duplicados</span>
+        )}
+        <Button onClick={() => setShowExplorer(true)}>
+          <Search size={14} /> Explorar en detalle
+        </Button>
       </div>
 
       <Field label="Convención de id (para los sourceName)">
@@ -146,10 +163,14 @@ export default function MatrixImportDialog({ file, onClose }: { file: File; onCl
 
       <div className="flex justify-end gap-2 mt-3">
         <Button onClick={onClose}>Cancelar</Button>
-        <Button variant="primary" onClick={confirm} disabled={result.stats.fields === 0}>
-          Cargar {result.stats.fields} campos{createStructure ? ' + estructura' : ''}
+        <Button variant="primary" onClick={confirm} disabled={result.stats.uniqueFields === 0}>
+          Cargar {result.stats.uniqueFields} campos{createStructure ? ' + estructura' : ''}
         </Button>
       </div>
+
+      {showExplorer && (
+        <MatrixExplorer result={result} conditionMapped={!!mapping.condition} onClose={() => setShowExplorer(false)} />
+      )}
     </Modal>
   );
 }
