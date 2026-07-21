@@ -72,16 +72,26 @@ export function Modal({
   onClose,
   children,
   wide,
+  size,
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
   wide?: boolean;
+  size?: 'default' | 'wide' | 'full';
 }) {
+  const width = size === 'full' ? 'max-w-6xl' : size === 'wide' || wide ? 'max-w-3xl' : 'max-w-lg';
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div
-        className={`bg-white rounded-lg shadow-xl w-full ${wide ? 'max-w-3xl' : 'max-w-lg'} max-h-[85vh] flex flex-col`}
+        className={`bg-white rounded-lg shadow-xl w-full ${width} max-h-[90vh] flex flex-col`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">

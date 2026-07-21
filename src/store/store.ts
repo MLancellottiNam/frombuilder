@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { nanoid } from 'nanoid';
 import type {
+  AcroField,
   Field,
   FieldType,
   FormDefinition,
@@ -10,6 +11,7 @@ import type {
   SourceField,
   Subsection,
 } from '../types';
+import { renameFieldId, allFieldIds } from '../lib/matching';
 import {
   emptyForm,
   fieldFromSource,
@@ -17,7 +19,7 @@ import {
   newSubsection,
   newUiField,
 } from '../lib/factory';
-import { detectConventionFromField } from '../lib/idConvention';
+import { detectConventionFromField, fieldIdFor } from '../lib/idConvention';
 
 export type Selection =
   | { kind: 'field'; id: string }
@@ -29,6 +31,15 @@ interface StoreState {
   project: Project;
   selection: Selection;
   collapsed: Record<string, boolean>;
+  /** Transient (not persisted): object URL + name of an attached PDF. */
+  pdfUrl: string | null;
+  pdfName: string | null;
+
+  // --- Etapa 2: PDF binding ---
+  loadAcroForms: (list: AcroField[]) => void;
+  setPdf: (url: string | null, name: string | null) => void;
+  /** Assign (or clear with null) the real PDF sourceName of a field; rewrites refs. Returns false on id collision. */
+  assignSourceName: (fieldId: string, acroName: string | null) => boolean;
 
   // --- source / import ---
   loadSourceFields: (fields: SourceField[], convention: IdConvention) => void;
@@ -79,6 +90,7 @@ function initialProject(): Project {
     idConvention: 'exact',
     form: emptyForm(),
     pool: [],
+    acroForms: [],
   };
 }
 
@@ -159,6 +171,54 @@ export const useStore = create<StoreState>((set, get) => ({
   project: initialProject(),
   selection: null,
   collapsed: {},
+  pdfUrl: null,
+  pdfName: null,
+
+  loadAcroForms: (list) =>
+    set((state) => ({ project: { ...state.project, acroForms: list } })),
+
+  setPdf: (url, name) => set({ pdfUrl: url, pdfName: name }),
+
+  assignSourceName: (fieldId, acroName) => {
+    const state = get();
+    const { form } = state.project;
+    // Locate field.
+    let target: Field | undefined;
+    for (const s of form.sections) {
+      target = s.fields.find((f) => f.id === fieldId) ?? s.subsections.flatMap((ss) => ss.fields).find((f) => f.id === fieldId);
+      if (target) break;
+    }
+    if (!target) return false;
+
+    if (acroName == null) {
+      // Unassign: drop sourceMeta, keep the id (UI ids are unconstrained).
+      set((st) => ({
+        project: {
+          ...st.project,
+          form: renameFieldId(st.project.form, fieldId, fieldId, { sourceMeta: null, checkedPdfValue: null }),
+        },
+      }));
+      return true;
+    }
+
+    const acro = state.project.acroForms.find((a) => a.name === acroName);
+    const newId = fieldIdFor(acroName, state.project.idConvention);
+    const ids = allFieldIds(form);
+    if (newId !== fieldId && ids.has(newId)) return false; // would duplicate an id
+
+    const sourceMeta: Record<string, unknown> = {
+      sourceName: acroName,
+      ...(acro?.page != null ? { page: acro.page } : {}),
+    };
+    const patch: Partial<Field> = { sourceMeta };
+    if (target.type === 'checkbox') patch.checkedPdfValue = true;
+
+    set((st) => ({
+      project: { ...st.project, form: renameFieldId(st.project.form, fieldId, newId, patch) },
+      selection: st.selection?.kind === 'field' && st.selection.id === fieldId ? { kind: 'field', id: newId } : st.selection,
+    }));
+    return true;
+  },
 
   loadSourceFields: (fields, convention) =>
     set((state) => {
@@ -306,7 +366,7 @@ export const useStore = create<StoreState>((set, get) => ({
       };
     }),
 
-  loadProject: (project) => set({ project, selection: null }),
+  loadProject: (project) => set({ project: { ...project, acroForms: project.acroForms ?? [] }, selection: null }),
   resetProject: () => set({ project: initialProject(), selection: null, collapsed: {} }),
   setProjectName: (name) => set((s) => ({ project: { ...s.project, name } })),
 
