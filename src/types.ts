@@ -205,10 +205,17 @@ export interface SourceField {
   isUiOnly?: boolean;
 }
 
-/** A real AcroForm field name extracted from the PDF (the sourceName universe). */
+/**
+ * A real PDF field from the AcroForm universe. When it comes from the Signframe
+ * auto-mapped "main JSON", it carries the authoritative id and full sourceMeta
+ * that must be copied verbatim so values render correctly.
+ */
 export interface AcroField {
-  name: string;
+  name: string; // sourceName
   page?: number;
+  id?: string; // authoritative field id from the main JSON (if any)
+  type?: FieldType;
+  sourceMeta?: SourceMeta; // real sourceMeta from Signframe (copied verbatim on bind)
 }
 
 export interface Project {

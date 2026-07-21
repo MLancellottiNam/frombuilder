@@ -1,3 +1,4 @@
+import { createContext, useContext, useMemo } from 'react';
 import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -12,8 +13,10 @@ import {
   GripVertical,
   ArrowUp,
   ArrowDown,
+  Eye as EyeIcon,
 } from 'lucide-react';
 import { useStore } from '../store/store';
+import { parseCondition } from '../lib/conditions';
 import type { Field, Section, Subsection } from '../types';
 import { Button } from './ui';
 
@@ -24,6 +27,29 @@ const WIDTH_LABEL: Record<string, string> = {
   quarter: '1/4',
   fit: 'fit',
 };
+
+/** id -> display label, so a field can show which trigger controls its visibility. */
+const FieldLabelCtx = createContext<Record<string, string>>({});
+
+/** Small "👁 si <trigger>" chip for a field with conditionalVisibility. */
+function ConditionChip({ field }: { field: Field }) {
+  const labels = useContext(FieldLabelCtx);
+  const g = parseCondition(field.conditionalVisibility);
+  if (!g || g.conditions.length === 0) return null;
+  if (g.conditions.some((c) => c.fieldId === 'field_NEVER_EXISTS')) {
+    return <span className="text-[9px] bg-slate-200 text-slate-500 rounded px-1 shrink-0">oculto</span>;
+  }
+  const names = g.conditions.map((c) => labels[c.fieldId] ?? c.fieldId);
+  const text = names.join(g.logic === 'or' ? ' / ' : ' + ');
+  return (
+    <span
+      className="text-[9px] bg-brand-100 text-brand-700 rounded px-1 shrink-0 max-w-[120px] truncate inline-flex items-center gap-0.5"
+      title={`Se muestra si: ${text}`}
+    >
+      <EyeIcon size={9} /> si {text}
+    </span>
+  );
+}
 
 function FieldCard({ field, subsectionId, option }: { field: Field; subsectionId: string; option?: boolean }) {
   const selection = useStore((s) => s.selection);
@@ -61,6 +87,7 @@ function FieldCard({ field, subsectionId, option }: { field: Field; subsectionId
         <span className="text-[10px] font-semibold uppercase text-slate-400 w-14 shrink-0">{field.type}</span>
       )}
       <span className="flex-1 truncate text-slate-700">{field.label || <em className="text-slate-400">sin label</em>}</span>
+      <ConditionChip field={field} />
       <span className="text-[10px] text-slate-400 shrink-0">{WIDTH_LABEL[field.width]}</span>
       {isSource ? (
         <span title="Campo del PDF (id y sourceMeta bloqueados)" className="shrink-0">
@@ -284,29 +311,45 @@ export default function Canvas() {
   const sections = useStore((s) => s.project.form.sections);
   const addSection = useStore((s) => s.addSection);
 
+  // Map every field id -> a readable label (radioGroupLabel + option, or label)
+  // so ConditionChip can name the trigger that controls a field's visibility.
+  const labels = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const s of sections) {
+      for (const sub of s.subsections) {
+        for (const f of sub.fields) {
+          m[f.id] = f.radioGroupLabel ? `${f.radioGroupLabel}: ${f.label}` : f.label;
+        }
+      }
+    }
+    return m;
+  }, [sections]);
+
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200">
-        <h2 className="text-sm font-semibold text-slate-700">Mapa del formulario</h2>
-        <Button variant="primary" onClick={addSection} className="!py-1 !px-2 text-xs">
-          <Plus size={14} /> Sección
-        </Button>
+    <FieldLabelCtx.Provider value={labels}>
+      <div className="flex flex-col h-full">
+        <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200">
+          <h2 className="text-sm font-semibold text-slate-700">Mapa del formulario</h2>
+          <Button variant="primary" onClick={addSection} className="!py-1 !px-2 text-xs">
+            <Plus size={14} /> Sección
+          </Button>
+        </div>
+        <div className="flex-1 overflow-y-auto scroll-thin p-3">
+          {sections.length === 0 ? (
+            <div className="text-center text-sm text-slate-400 mt-12 px-6">
+              <p className="mb-3">No hay secciones todavía.</p>
+              <Button variant="primary" onClick={addSection}>
+                <Plus size={15} /> Crear primera sección
+              </Button>
+              <p className="mt-4 text-xs">
+                También podés seleccionar campos en el pool y usar “Agrupar” para crear una subsección automáticamente.
+              </p>
+            </div>
+          ) : (
+            sections.map((s, i) => <SectionNode key={s.id} section={s} index={i} total={sections.length} />)
+          )}
+        </div>
       </div>
-      <div className="flex-1 overflow-y-auto scroll-thin p-3">
-        {sections.length === 0 ? (
-          <div className="text-center text-sm text-slate-400 mt-12 px-6">
-            <p className="mb-3">No hay secciones todavía.</p>
-            <Button variant="primary" onClick={addSection}>
-              <Plus size={15} /> Crear primera sección
-            </Button>
-            <p className="mt-4 text-xs">
-              También podés seleccionar campos en el pool y usar “Agrupar” para crear una subsección automáticamente.
-            </p>
-          </div>
-        ) : (
-          sections.map((s, i) => <SectionNode key={s.id} section={s} index={i} total={sections.length} />)
-        )}
-      </div>
-    </div>
+    </FieldLabelCtx.Provider>
   );
 }

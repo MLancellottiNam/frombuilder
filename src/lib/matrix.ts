@@ -73,6 +73,9 @@ const norm = (s: string) =>
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '');
 
+/** Aggressive key for matching labels/rule targets: also drops punctuation. */
+const normKey = (s: string) => norm(s).replace(/[^a-z0-9]+/g, ' ').trim();
+
 /**
  * Guess the column mapping from header names. Candidate-priority: tries each
  * candidate string in order and returns the first header that contains it, so
@@ -444,7 +447,7 @@ export function materializeMatrix(
   };
 
   const pushQuestion = (label: string, id: string) => {
-    const k = norm(label);
+    const k = normKey(label);
     const arr = questionFields.get(k) ?? [];
     arr.push(id);
     questionFields.set(k, arr);
@@ -562,7 +565,7 @@ export function materializeMatrix(
   };
 
   for (const p of selfPending) {
-    const targetId = bySourceName.get(p.ref) ?? questionFields.get(norm(p.ref))?.[0];
+    const targetId = bySourceName.get(p.ref) ?? questionFields.get(normKey(p.ref))?.[0];
     if (!targetId) continue;
     const operator: Condition['operator'] = p.value ? 'equals' : p.negated ? 'empty' : 'not_empty';
     p.field.conditionalVisibility = serializeCondition({
@@ -573,7 +576,7 @@ export function materializeMatrix(
   }
   for (const rp of revealPending) {
     for (const name of rp.names) {
-      for (const tid of questionFields.get(norm(name)) ?? []) {
+      for (const tid of questionFields.get(normKey(name)) ?? []) {
         const tf = fieldById.get(tid);
         if (tf) {
           addOr(tf, { fieldId: rp.triggerId, operator: 'not_empty' });

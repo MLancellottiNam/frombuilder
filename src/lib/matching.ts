@@ -126,3 +126,35 @@ export function renameFieldId(form: FormDefinition, oldId: string, newId: string
 export function allFieldIds(form: FormDefinition): Set<string> {
   return new Set(flattenFields(form).map((f) => f.id));
 }
+
+/**
+ * Extract the AcroForm universe from a Signframe "main" JSON (the auto-mapped
+ * PDF import): every field that carries a sourceMeta, with its authoritative id
+ * and full sourceMeta copied so binding renders values correctly.
+ */
+export function extractAcroFromForm(json: unknown): AcroField[] {
+  const form = json as Partial<FormDefinition>;
+  if (!form || !Array.isArray(form.sections)) return [];
+  const out: AcroField[] = [];
+  const seen = new Set<string>();
+  const visit = (f: Field) => {
+    const sm = f.sourceMeta as Record<string, unknown> | null;
+    const name = typeof sm?.sourceName === 'string' ? (sm.sourceName as string) : null;
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      out.push({
+        name,
+        id: f.id,
+        type: f.type,
+        page: typeof sm?.page === 'number' ? (sm.page as number) : undefined,
+        sourceMeta: f.sourceMeta ?? undefined,
+      });
+    }
+    f.repeaterConfig?.fields?.forEach(visit);
+  };
+  for (const s of form.sections as Section[]) {
+    s.fields?.forEach(visit);
+    s.subsections?.forEach((sub) => sub.fields?.forEach(visit));
+  }
+  return out;
+}

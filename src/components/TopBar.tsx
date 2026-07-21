@@ -3,6 +3,7 @@ import { Upload, FileJson, Download, Save, FolderOpen, ShieldCheck, ShieldAlert,
 import { useStore } from '../store/store';
 import { runValidations, errorCount } from '../lib/validation';
 import { buildExport, downloadJson, slugify } from '../lib/exporter';
+import { matrixToCsv, downloadCsv, downloadMatrixXlsx } from '../lib/matrixOut';
 import type { FormDefinition, Project } from '../types';
 import { Button } from './ui';
 import CsvImportDialog from './CsvImportDialog';
@@ -29,6 +30,7 @@ export default function TopBar() {
   const [matrixFile, setMatrixFile] = useState<File | null>(null);
   const [acroFile, setAcroFile] = useState<File | null>(null);
   const [showUnir, setShowUnir] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [showValidation, setShowValidation] = useState(false);
 
   const errors = errorCount(runValidations(project));
@@ -62,10 +64,19 @@ export default function TopBar() {
     }
   };
 
-  const doExport = () => {
+  const doExportJson = () => {
     if (errors > 0 && !confirm(`Hay ${errors} validación(es) con errores. ¿Exportar igualmente?`)) return;
     const out = buildExport(project.form);
     downloadJson(out, `form-definition-${slugify(project.name)}.json`);
+    setExportOpen(false);
+  };
+  const doExportCsv = () => {
+    downloadCsv(matrixToCsv(project), `matriz-${slugify(project.name)}.csv`);
+    setExportOpen(false);
+  };
+  const doExportXlsx = () => {
+    downloadMatrixXlsx(project, `matriz-${slugify(project.name)}.xlsx`);
+    setExportOpen(false);
   };
 
   const doSaveProject = () => downloadJson(project, `proyecto-${slugify(project.name)}.json`);
@@ -97,7 +108,7 @@ export default function TopBar() {
         <input
           ref={acroInput}
           type="file"
-          accept=".csv,.txt,.xlsx,.xls"
+          accept=".csv,.txt,.xlsx,.xls,.json"
           hidden
           onChange={() => {
             const f = acroInput.current?.files?.[0];
@@ -125,8 +136,8 @@ export default function TopBar() {
         <Button onClick={() => matrixInput.current?.click()} title="Importar ficha/matriz (CSV o xlsx)">
           <Table2 size={15} /> Matriz
         </Button>
-        <Button onClick={() => acroInput.current?.click()} title="Importar lista de AcroForms del PDF (CSV/xlsx)">
-          <ListChecks size={15} /> AcroForms{project.acroForms.length > 0 ? ` (${project.acroForms.length})` : ''}
+        <Button onClick={() => acroInput.current?.click()} title="Importar JSON de Signframe o lista de AcroForms (CSV/xlsx)">
+          <ListChecks size={15} /> Campos PDF{project.acroForms.length > 0 ? ` (${project.acroForms.length})` : ''}
         </Button>
         <Button onClick={() => pdfInput.current?.click()} title={pdfName ?? 'Adjuntar PDF de referencia'}>
           <FileText size={15} /> PDF{pdfName ? ' ✓' : ''}
@@ -154,9 +165,27 @@ export default function TopBar() {
           {errors > 0 ? `${errors} errores` : 'OK'}
         </button>
 
-        <Button variant="primary" onClick={doExport}>
-          <Download size={15} /> Exportar
-        </Button>
+        <div className="relative">
+          <Button variant="primary" onClick={() => setExportOpen((v) => !v)}>
+            <Download size={15} /> Exportar ▾
+          </Button>
+          {exportOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setExportOpen(false)} />
+              <div className="absolute right-0 mt-1 z-50 w-60 bg-white border border-slate-200 rounded-md shadow-lg py-1 text-sm">
+                <button className="w-full text-left px-3 py-1.5 hover:bg-slate-50" onClick={doExportJson}>
+                  <span className="font-medium">JSON</span> · form-definition Signframe
+                </button>
+                <button className="w-full text-left px-3 py-1.5 hover:bg-slate-50" onClick={doExportCsv}>
+                  <span className="font-medium">CSV</span> · matriz plana (round-trip)
+                </button>
+                <button className="w-full text-left px-3 py-1.5 hover:bg-slate-50" onClick={doExportXlsx}>
+                  <span className="font-medium">xlsx</span> · matriz plana (Excel)
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </header>
 
       {csvText !== null && <CsvImportDialog text={csvText} onClose={() => setCsvText(null)} />}
