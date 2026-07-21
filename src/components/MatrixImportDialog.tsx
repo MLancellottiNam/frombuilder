@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Layers, Columns3, FolderTree, Search, Copy } from 'lucide-react';
-import { Modal, Field, Select, Button, Checkbox } from './ui';
-import { parseTable, guessMatrixMapping, readMatrix, type Table, type MatrixMapping } from '../lib/matrix';
+import { Modal, Field, Select, Button } from './ui';
+import { parseTable, guessMatrixMapping, readMatrix, materializeMatrix, type Table, type MatrixMapping } from '../lib/matrix';
 import { detectConvention } from '../lib/idConvention';
 import { useStore } from '../store/store';
 import type { IdConvention } from '../types';
@@ -12,12 +12,13 @@ const none = '(ninguna)';
 export default function MatrixImportDialog({ file, onClose }: { file: File; onClose: () => void }) {
   const loadMatrix = useStore((s) => s.loadMatrix);
   const createEmptyStructure = useStore((s) => s.createEmptyStructure);
+  const applyMatrixBuild = useStore((s) => s.applyMatrixBuild);
 
   const [table, setTable] = useState<Table | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mapping, setMapping] = useState<MatrixMapping>({});
   const [convention, setConvention] = useState<IdConvention>('exact');
-  const [createStructure, setCreateStructure] = useState(true);
+  const [mode, setMode] = useState<'build' | 'pool'>('build');
   const [showExplorer, setShowExplorer] = useState(false);
 
   useEffect(() => {
@@ -30,6 +31,10 @@ export default function MatrixImportDialog({ file, onClose }: { file: File; onCl
   }, [file]);
 
   const result = useMemo(() => (table ? readMatrix(table, mapping) : null), [table, mapping]);
+  const buildPreview = useMemo(
+    () => (result && mode === 'build' ? materializeMatrix(result, convention) : null),
+    [result, mode, convention],
+  );
 
   useEffect(() => {
     if (result) setConvention(detectConvention(result.sourceFields.filter((f) => !f.isUiOnly).map((f) => f.sourceName)));
@@ -40,8 +45,13 @@ export default function MatrixImportDialog({ file, onClose }: { file: File; onCl
 
   const confirm = () => {
     if (!result) return;
-    loadMatrix(result.sourceFields, convention);
-    if (createStructure) createEmptyStructure(result.groups);
+    if (mode === 'build') {
+      const built = materializeMatrix(result, convention);
+      applyMatrixBuild(built.sections, built.sourceFields, convention);
+    } else {
+      loadMatrix(result.sourceFields, convention);
+      createEmptyStructure(result.groups);
+    }
     onClose();
   };
 
@@ -153,18 +163,46 @@ export default function MatrixImportDialog({ file, onClose }: { file: File; onCl
         </div>
       </div>
 
-      <div className="mt-3">
-        <Checkbox
-          label="Crear las secciones y subsecciones vacías detectadas (para arrastrar campos adentro)"
-          checked={createStructure}
-          onChange={setCreateStructure}
-        />
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          onClick={() => setMode('build')}
+          className={`text-left rounded-md border px-3 py-2 ${
+            mode === 'build' ? 'border-brand-500 ring-1 ring-brand-500 bg-brand-50' : 'border-slate-300'
+          }`}
+        >
+          <div className="text-sm font-medium text-slate-800">Etapa 1 · Armar ordenado</div>
+          <div className="text-[11px] text-slate-500">
+            Crea las secciones/subsecciones con los campos <b>ya ubicados y ordenados</b> adentro (y vuelca las
+            condiciones a visibilidad).
+          </div>
+        </button>
+        <button
+          onClick={() => setMode('pool')}
+          className={`text-left rounded-md border px-3 py-2 ${
+            mode === 'pool' ? 'border-brand-500 ring-1 ring-brand-500 bg-brand-50' : 'border-slate-300'
+          }`}
+        >
+          <div className="text-sm font-medium text-slate-800">Solo al pool</div>
+          <div className="text-[11px] text-slate-500">
+            Carga los campos al pool + crea las secciones vacías, para arrastrarlos vos.
+          </div>
+        </button>
       </div>
+
+      {buildPreview && (
+        <div className="mt-2 text-[11px] text-slate-500">
+          Se armarán <b>{buildPreview.sections.length}</b> secciones · <b>{buildPreview.radioGroups}</b> preguntas de
+          opciones (radios desdoblados) · <b>{buildPreview.conditionsApplied}</b> condiciones de visibilidad
+          {buildPreview.skipped > 0 ? ` · ${buildPreview.skipped} duplicado(s) omitido(s)` : ''}.
+        </div>
+      )}
 
       <div className="flex justify-end gap-2 mt-3">
         <Button onClick={onClose}>Cancelar</Button>
         <Button variant="primary" onClick={confirm} disabled={result.stats.uniqueFields === 0}>
-          Cargar {result.stats.uniqueFields} campos{createStructure ? ' + estructura' : ''}
+          {mode === 'build'
+            ? `Armar ${result.stats.sections} secciones con ${result.stats.uniqueFields} campos`
+            : `Cargar ${result.stats.uniqueFields} campos al pool`}
         </Button>
       </div>
 

@@ -52,6 +52,31 @@ para un segundo momento. Las columnas se mapean a mano (se auto-detectan por
 nombre) y soporta forward-fill: si la sección solo aparece en la primera fila del
 grupo, se arrastra a las siguientes.
 
+#### Ficha del INS (Etapa 1: armar ordenado)
+
+El importador reconoce el formato real de la **“Ficha de Configuración” del INS**
+(`.xlsx` con varias hojas). Al importar:
+
+- **detecta la hoja principal** (la que tiene más filas) entre las 3 hojas;
+- mapea las columnas por nombre (tolerante a acentos): `Pasos Formulario`→sección,
+  `Sección`→subsección, `Nombre del campo en formulario`→label, `Tipo de dato`→tipo,
+  `Valor`→opción, `Regla`→condición, `Obligatorio`→required, `Visualización en
+  Formularios`→readOnly/hidden, `Nombre del campo en el JSON`→`salidaJSON`,
+  `Nombre del campo en el PDF`→`sourceName`;
+- **forward-fill** de sección/subsección (celdas combinadas);
+- **agrupa opciones**: filas consecutivas con el mismo label = una pregunta con
+  varias opciones → se modela **desdoblada** (un `radio` por opción, compartiendo
+  `radioGroupLabel` y `radioGroupFields`, con `jsonValue` = valor de la opción);
+- **reglas col G**: `"se despliegan los campos: A / B"` hace que A/B se muestren
+  cuando esa opción se selecciona (`conditionalVisibility` `not_empty`, combinadas
+  con `or` si varias opciones revelan el mismo campo).
+
+En el modo **Etapa 1 · Armar ordenado**, todo esto queda ya ubicado en su lugar.
+Como la columna `Nombre del campo en el PDF` suele venir vacía, los campos nacen
+como UI (`sourceMeta: null`); el binding real al PDF es la **Etapa 2** (cruzar
+contra la lista de AcroForms para asignar `sourceMeta`), y la **Etapa 3** es el
+export del JSON completo.
+
 #### Explorar matriz (entenderla antes de armar)
 
 Desde el importador, **Explorar en detalle** abre una vista de solo lectura para

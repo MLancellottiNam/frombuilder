@@ -34,6 +34,7 @@ interface StoreState {
   loadSourceFields: (fields: SourceField[], convention: IdConvention) => void;
   loadMatrix: (fields: SourceField[], convention: IdConvention) => void;
   createEmptyStructure: (groups: { section: string; subsections: string[] }[]) => void;
+  applyMatrixBuild: (sections: Section[], sourceFields: SourceField[], convention: IdConvention) => void;
   importForm: (form: FormDefinition, sourceFields?: SourceField[]) => void;
   loadProject: (project: Project) => void;
   resetProject: () => void;
@@ -233,6 +234,36 @@ export const useStore = create<StoreState>((set, get) => ({
         }
       }
       return { project: { ...state.project, form } };
+    }),
+
+  applyMatrixBuild: (sections, sourceFields, convention) =>
+    set((state) => {
+      // Union source fields (matrix wins for overlapping names).
+      const byName = new Map<string, SourceField>();
+      for (const f of state.project.sourceFields) byName.set(f.sourceName, f);
+      for (const f of sourceFields) byName.set(f.sourceName, { ...byName.get(f.sourceName), ...f });
+      const merged = Array.from(byName.values());
+
+      const placed = new Set<string>();
+      for (const s of sections) {
+        for (const sub of s.subsections) {
+          for (const f of sub.fields) {
+            const sn = sourceNameOf(f);
+            if (sn) placed.add(sn);
+          }
+        }
+      }
+      const pool = merged.map((f) => f.sourceName).filter((n) => !placed.has(n) && !n.startsWith('__ui_'));
+      return {
+        project: {
+          ...state.project,
+          idConvention: convention,
+          sourceFields: merged,
+          form: { ...state.project.form, sections },
+          pool,
+        },
+        selection: null,
+      };
     }),
 
   importForm: (form, sourceFields) =>
