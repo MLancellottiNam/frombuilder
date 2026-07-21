@@ -1,11 +1,12 @@
 import { useRef, useState } from 'react';
-import { Upload, FileJson, Download, Save, FolderOpen, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { Upload, FileJson, Download, Save, FolderOpen, ShieldCheck, ShieldAlert, Table2 } from 'lucide-react';
 import { useStore } from '../store/store';
 import { runValidations, errorCount } from '../lib/validation';
 import { buildExport, downloadJson, slugify } from '../lib/exporter';
 import type { FormDefinition, Project } from '../types';
 import { Button } from './ui';
 import CsvImportDialog from './CsvImportDialog';
+import MatrixImportDialog from './MatrixImportDialog';
 import ValidationPanel from './ValidationPanel';
 
 export default function TopBar() {
@@ -15,9 +16,11 @@ export default function TopBar() {
   const setProjectName = useStore((s) => s.setProjectName);
 
   const csvInput = useRef<HTMLInputElement>(null);
+  const matrixInput = useRef<HTMLInputElement>(null);
   const jsonInput = useRef<HTMLInputElement>(null);
   const projectInput = useRef<HTMLInputElement>(null);
   const [csvText, setCsvText] = useState<string | null>(null);
+  const [matrixFile, setMatrixFile] = useState<File | null>(null);
   const [showValidation, setShowValidation] = useState(false);
 
   const errors = errorCount(runValidations(project));
@@ -72,11 +75,25 @@ export default function TopBar() {
         <div className="flex-1" />
 
         <input ref={csvInput} type="file" accept=".csv,.txt" hidden onChange={() => readFile(csvInput.current, setCsvText)} />
+        <input
+          ref={matrixInput}
+          type="file"
+          accept=".csv,.txt,.xlsx,.xls"
+          hidden
+          onChange={() => {
+            const f = matrixInput.current?.files?.[0];
+            if (f) setMatrixFile(f);
+            if (matrixInput.current) matrixInput.current.value = '';
+          }}
+        />
         <input ref={jsonInput} type="file" accept=".json" hidden onChange={() => readFile(jsonInput.current, onImportJson)} />
         <input ref={projectInput} type="file" accept=".json" hidden onChange={() => readFile(projectInput.current, onLoadProject)} />
 
         <Button onClick={() => csvInput.current?.click()}>
           <Upload size={15} /> CSV
+        </Button>
+        <Button onClick={() => matrixInput.current?.click()} title="Importar ficha/matriz (CSV o xlsx)">
+          <Table2 size={15} /> Matriz
         </Button>
         <Button onClick={() => jsonInput.current?.click()}>
           <FileJson size={15} /> Importar JSON
@@ -104,6 +121,7 @@ export default function TopBar() {
       </header>
 
       {csvText !== null && <CsvImportDialog text={csvText} onClose={() => setCsvText(null)} />}
+      {matrixFile && <MatrixImportDialog file={matrixFile} onClose={() => setMatrixFile(null)} />}
       {showValidation && <ValidationPanel onClose={() => setShowValidation(false)} />}
     </>
   );

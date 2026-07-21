@@ -1,0 +1,155 @@
+import { useEffect, useMemo, useState } from 'react';
+import { Layers, Columns3, FolderTree } from 'lucide-react';
+import { Modal, Field, Select, Button, Checkbox } from './ui';
+import { parseTable, guessMatrixMapping, readMatrix, type Table, type MatrixMapping } from '../lib/matrix';
+import { detectConvention } from '../lib/idConvention';
+import { useStore } from '../store/store';
+import type { IdConvention } from '../types';
+
+const none = '(ninguna)';
+
+export default function MatrixImportDialog({ file, onClose }: { file: File; onClose: () => void }) {
+  const loadMatrix = useStore((s) => s.loadMatrix);
+  const createEmptyStructure = useStore((s) => s.createEmptyStructure);
+
+  const [table, setTable] = useState<Table | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [mapping, setMapping] = useState<MatrixMapping>({});
+  const [convention, setConvention] = useState<IdConvention>('exact');
+  const [createStructure, setCreateStructure] = useState(true);
+
+  useEffect(() => {
+    parseTable(file)
+      .then((t) => {
+        setTable(t);
+        setMapping(guessMatrixMapping(t.headers));
+      })
+      .catch((e) => setError(String(e)));
+  }, [file]);
+
+  const result = useMemo(() => (table ? readMatrix(table, mapping) : null), [table, mapping]);
+
+  useEffect(() => {
+    if (result) setConvention(detectConvention(result.sourceFields.filter((f) => !f.isUiOnly).map((f) => f.sourceName)));
+  }, [result]);
+
+  const setCol = (key: keyof MatrixMapping) => (v: string) =>
+    setMapping((m) => ({ ...m, [key]: v === none ? undefined : v }));
+
+  const confirm = () => {
+    if (!result) return;
+    loadMatrix(result.sourceFields, convention);
+    if (createStructure) createEmptyStructure(result.groups);
+    onClose();
+  };
+
+  if (error) {
+    return (
+      <Modal title="Importar matriz / ficha" onClose={onClose}>
+        <p className="text-sm text-red-600">No se pudo leer el archivo: {error}</p>
+      </Modal>
+    );
+  }
+  if (!table || !result) {
+    return (
+      <Modal title="Importar matriz / ficha" onClose={onClose}>
+        <p className="text-sm text-slate-500">Leyendo archivo…</p>
+      </Modal>
+    );
+  }
+
+  const colSelect = (key: keyof MatrixMapping, label: string, optional = true) => (
+    <Field label={label}>
+      <Select value={mapping[key] ?? none} onChange={(e) => setCol(key)(e.target.value)}>
+        {optional && <option>{none}</option>}
+        {table.headers.map((h) => (
+          <option key={h} value={h}>
+            {h}
+          </option>
+        ))}
+      </Select>
+    </Field>
+  );
+
+  return (
+    <Modal title="Importar matriz / ficha" onClose={onClose} wide>
+      {/* Resumen: columnas + estructura detectada */}
+      <div className="grid grid-cols-4 gap-2 mb-4">
+        {[
+          { icon: Columns3, n: result.stats.columns, l: 'columnas' },
+          { icon: FolderTree, n: result.stats.sections, l: 'secciones' },
+          { icon: Layers, n: result.stats.subsections, l: 'subsecciones' },
+          { icon: Layers, n: result.stats.fields, l: 'campos' },
+        ].map((c, i) => (
+          <div key={i} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-center">
+            <c.icon size={15} className="mx-auto text-brand-600 mb-0.5" />
+            <div className="text-lg font-semibold text-slate-800 leading-none">{c.n}</div>
+            <div className="text-[11px] text-slate-500">{c.l}</div>
+          </div>
+        ))}
+      </div>
+
+      <p className="text-xs text-slate-500 mb-2">
+        Mapeá qué columna es cada cosa. Los campos se cargan al <b>pool</b> (con la sección/subsección sugerida) para
+        que los arrastres. No se arma la definición automáticamente.
+      </p>
+
+      <div className="grid grid-cols-3 gap-x-3">
+        {colSelect('section', 'Columna Sección')}
+        {colSelect('subsection', 'Columna Subsección')}
+        {colSelect('sourceName', 'Columna campo/sourceName')}
+        {colSelect('label', 'Columna Label')}
+        {colSelect('type', 'Columna Tipo')}
+        {colSelect('path', 'Columna Path (salidaJSON)')}
+      </div>
+
+      <Field label="Convención de id (para los sourceName)">
+        <Select value={convention} onChange={(e) => setConvention(e.target.value as IdConvention)}>
+          <option value="exact">exact</option>
+          <option value="lower">lower</option>
+        </Select>
+      </Field>
+
+      {/* Árbol detectado */}
+      <div className="mt-2 border border-slate-200 rounded-md">
+        <div className="px-3 py-2 text-xs font-medium text-slate-500 border-b border-slate-100">
+          Estructura detectada (no se completa sola)
+        </div>
+        <div className="max-h-52 overflow-y-auto scroll-thin p-2 text-sm">
+          {result.groups.length === 0 && (
+            <p className="text-xs text-slate-400 px-2 py-3">
+              No se detectaron secciones. Revisá el mapeo de columnas.
+            </p>
+          )}
+          {result.groups.map((g) => (
+            <div key={g.section} className="mb-1.5">
+              <div className="font-medium text-slate-700">▸ {g.section}</div>
+              <div className="ml-4 text-slate-500 text-xs">
+                {g.subsections.map((s) => (
+                  <span key={s} className="inline-block bg-slate-100 rounded px-1.5 py-0.5 mr-1 mb-1">
+                    {s}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-3">
+        <Checkbox
+          label="Crear las secciones y subsecciones vacías detectadas (para arrastrar campos adentro)"
+          checked={createStructure}
+          onChange={setCreateStructure}
+        />
+      </div>
+
+      <div className="flex justify-end gap-2 mt-3">
+        <Button onClick={onClose}>Cancelar</Button>
+        <Button variant="primary" onClick={confirm} disabled={result.stats.fields === 0}>
+          Cargar {result.stats.fields} campos{createStructure ? ' + estructura' : ''}
+        </Button>
+      </div>
+    </Modal>
+  );
+}

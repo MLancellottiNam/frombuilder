@@ -40,12 +40,20 @@ function PoolCard({
         <GripVertical size={16} />
       </button>
       <div className="min-w-0 flex-1">
-        <div className="font-mono text-slate-700 truncate">{src.sourceName}</div>
-        <div className="text-[11px] text-slate-400 truncate">
-          {src.nativeType ?? 'text'}
-          {src.page != null ? ` · p.${src.page}` : ''}
-          {src.label ? ` · ${src.label}` : ''}
+        <div className="font-mono text-slate-700 truncate">
+          {src.isUiOnly ? src.label || 'Campo UI' : src.sourceName}
         </div>
+        <div className="text-[11px] text-slate-400 truncate">
+          {src.suggestedType ?? src.nativeType ?? 'text'}
+          {src.page != null ? ` · p.${src.page}` : ''}
+          {!src.isUiOnly && src.label ? ` · ${src.label}` : ''}
+        </div>
+        {(src.suggestedSection || src.suggestedSubsection) && (
+          <div className="text-[10px] text-brand-600 truncate mt-0.5">
+            → {src.suggestedSection}
+            {src.suggestedSubsection ? ` / ${src.suggestedSubsection}` : ''}
+          </div>
+        )}
       </div>
     </div>
   );
