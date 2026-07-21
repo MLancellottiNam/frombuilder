@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { nanoid } from 'nanoid';
 import type {
   Field,
   FieldType,
@@ -31,6 +32,8 @@ interface StoreState {
 
   // --- source / import ---
   loadSourceFields: (fields: SourceField[], convention: IdConvention) => void;
+  loadMatrix: (fields: SourceField[], convention: IdConvention) => void;
+  createEmptyStructure: (groups: { section: string; subsections: string[] }[]) => void;
   importForm: (form: FormDefinition, sourceFields?: SourceField[]) => void;
   loadProject: (project: Project) => void;
   resetProject: () => void;
@@ -172,6 +175,64 @@ export const useStore = create<StoreState>((set, get) => ({
       return {
         project: { ...state.project, sourceFields: fields, idConvention: convention, pool },
       };
+    }),
+
+  loadMatrix: (fields, convention) =>
+    set((state) => {
+      // Merge matrix candidates with any existing sourceFields (union by name).
+      const byName = new Map<string, SourceField>();
+      for (const f of state.project.sourceFields) byName.set(f.sourceName, f);
+      for (const f of fields) byName.set(f.sourceName, { ...byName.get(f.sourceName), ...f });
+      const merged = Array.from(byName.values());
+
+      const placed = new Set<string>();
+      for (const s of state.project.form.sections) {
+        for (const sub of s.subsections) {
+          for (const f of sub.fields) {
+            const sn = sourceNameOf(f);
+            if (sn) placed.add(sn);
+          }
+        }
+      }
+      const pool = merged.map((f) => f.sourceName).filter((n) => !placed.has(n));
+      return { project: { ...state.project, sourceFields: merged, idConvention: convention, pool } };
+    }),
+
+  createEmptyStructure: (groups) =>
+    set((state) => {
+      let form = state.project.form;
+      for (const g of groups) {
+        let section = form.sections.find((s) => s.title === g.section);
+        if (!section) {
+          section = {
+            id: 'section_' + nanoid(8),
+            title: g.section,
+            description: null,
+            instructions: null,
+            conditionalVisibility: null,
+            order: form.sections.length + 1,
+            hidden: null,
+            fields: [],
+            subsections: [],
+            childrenOrder: [],
+          };
+          form = { ...form, sections: [...form.sections, section] };
+        }
+        const secId = section.id;
+        for (const subTitle of g.subsections) {
+          form = mapSections(form, (s) => {
+            if (s.id !== secId) return s;
+            if (s.subsections.some((ss) => ss.title === subTitle)) return s;
+            const sub = newSubsection(s.subsections.length + 1, subTitle);
+            return {
+              ...s,
+              subsections: [...s.subsections, sub],
+              childrenOrder: [...s.childrenOrder, { kind: 'subsection', id: sub.id }],
+            };
+          });
+        }
+      }
+      return { project: { ...state.project, form } };
     }),
 
   importForm: (form, sourceFields) =>

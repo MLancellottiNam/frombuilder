@@ -195,6 +195,14 @@ export interface SourceField {
   page?: number;
   nativeType?: string;
   label?: string;
+  // Sugerencias que vienen de la ficha/matriz (no obligan nada; solo guían y
+  // pre-cargan propiedades al arrastrar el campo al canvas).
+  suggestedSection?: string;
+  suggestedSubsection?: string;
+  suggestedType?: FieldType;
+  suggestedPath?: string;
+  /** true si la matriz no traía sourceName: candidato a campo de UI (sin PDF). */
+  isUiOnly?: boolean;
 }
 
 export interface Project {

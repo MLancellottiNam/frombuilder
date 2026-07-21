@@ -34,6 +34,24 @@ También podés **Importar JSON** de una definición existente para seguir
 editándola (preserva `_sourcePdf`, ids y `sourceMeta`), y **guardar/cargar el
 proyecto** completo como `.json`.
 
+### Importar ficha/matriz (CSV o xlsx)
+
+El botón **Matriz** sube una planilla (CSV o `.xlsx`) que describe cómo debería
+verse el formulario. La app **no arma la definición sola**: mira las columnas y
+las secciones/subsecciones, te muestra un resumen (cuántas columnas, secciones,
+subsecciones y campos detectó) y:
+
+- carga los campos al **pool**, cada uno con su **sección/subsección sugerida**
+  como etiqueta (para que sepas a dónde va);
+- opcionalmente crea las **secciones y subsecciones vacías** detectadas, para que
+  arrastres los campos adentro y armes el camino a mano.
+
+Al arrastrar un campo de la matriz, nace con el tipo y el `salidaJSON` sugeridos
+(igual respetando la Regla de Oro). El mapeo fino contra el JSON del PDF queda
+para un segundo momento. Las columnas se mapean a mano (se auto-detectan por
+nombre) y soporta forward-fill: si la sección solo aparece en la primera fila del
+grupo, se arrastra a las siguientes.
+
 ## Regla de Oro
 
 Los campos que pintan el PDF llevan `sourceMeta` y su `id` es inmutable, con

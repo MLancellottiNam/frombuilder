@@ -66,8 +66,15 @@ export function fieldFromSource(
   convention: IdConvention,
   order: number,
 ): Field {
+  // Matrix rows without a real sourceName become UI-only fields (no sourceMeta).
+  if (src.isUiOnly) {
+    const uf = newUiField(order, src.suggestedType ?? defaultTypeFor(src.nativeType));
+    if (src.label) uf.label = src.label;
+    applySuggestions(uf, src);
+    return uf;
+  }
   const id = fieldIdFor(src.sourceName, convention);
-  const type = defaultTypeFor(src.nativeType);
+  const type = src.suggestedType ?? defaultTypeFor(src.nativeType);
   const f = baseField(id, src.label || src.sourceName, type, order);
   f.sourceMeta = {
     sourceName: src.sourceName,
@@ -76,7 +83,20 @@ export function fieldFromSource(
   };
   // Checkboxes that paint the PDF must use checkedPdfValue: true (never "X").
   if (type === 'checkbox') f.checkedPdfValue = true;
+  applySuggestions(f, src);
   return f;
+}
+
+/** Pre-fill type/path from the matrix suggestions (drag-time convenience). */
+function applySuggestions(f: Field, src: SourceField): void {
+  if (src.suggestedType) {
+    f.type = src.suggestedType;
+    if (f.type === 'checkbox' && f.sourceMeta) f.checkedPdfValue = true;
+  }
+  if (src.suggestedPath) {
+    f.salidaJSON = src.suggestedPath;
+    f.jsonOutputPath = src.suggestedPath;
+  }
 }
 
 /** A UI-only field (select, split radio, helper, repeater...) — no sourceMeta. */
