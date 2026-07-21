@@ -31,6 +31,10 @@ export default function MatrixImportDialog({ file, onClose }: { file: File; onCl
   }, [file]);
 
   const result = useMemo(() => (table ? readMatrix(table, mapping) : null), [table, mapping]);
+  const buildPreview = useMemo(
+    () => (result && mode === 'build' ? materializeMatrix(result, convention) : null),
+    [result, mode, convention],
+  );
 
   useEffect(() => {
     if (result) setConvention(detectConvention(result.sourceFields.filter((f) => !f.isUiOnly).map((f) => f.sourceName)));
@@ -184,6 +188,14 @@ export default function MatrixImportDialog({ file, onClose }: { file: File; onCl
           </div>
         </button>
       </div>
+
+      {buildPreview && (
+        <div className="mt-2 text-[11px] text-slate-500">
+          Se armarán <b>{buildPreview.sections.length}</b> secciones · <b>{buildPreview.radioGroups}</b> preguntas de
+          opciones (radios desdoblados) · <b>{buildPreview.conditionsApplied}</b> condiciones de visibilidad
+          {buildPreview.skipped > 0 ? ` · ${buildPreview.skipped} duplicado(s) omitido(s)` : ''}.
+        </div>
+      )}
 
       <div className="flex justify-end gap-2 mt-3">
         <Button onClick={onClose}>Cancelar</Button>
