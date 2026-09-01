@@ -14,6 +14,8 @@ import TopBar from './components/TopBar';
 import Pool from './components/Pool';
 import Canvas from './components/Canvas';
 import Inspector from './components/Inspector';
+import Home from './components/Home';
+import Etapa0Screen from './components/etapa0/Etapa0Screen';
 
 /** Locate a field's subsection id and index within it. */
 function locateField(fieldId: string) {
@@ -39,6 +41,7 @@ function subsectionLength(subsectionId: string): number {
 export default function App() {
   const placeSourceField = useStore((s) => s.placeSourceField);
   const moveField = useStore((s) => s.moveField);
+  const view = useStore((s) => s.view);
   const [activeLabel, setActiveLabel] = useState<string | null>(null);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
@@ -89,6 +92,9 @@ export default function App() {
       moveField(String(a.fieldId), targetSub, index);
     }
   };
+
+  if (view === 'home') return <Home />;
+  if (view === 'etapa0') return <Etapa0Screen />;
 
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={onDragStart} onDragEnd={onDragEnd}>

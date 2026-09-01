@@ -19,6 +19,7 @@ export default function TopBar() {
   const setProjectName = useStore((s) => s.setProjectName);
   const setPdf = useStore((s) => s.setPdf);
   const pdfName = useStore((s) => s.pdfName);
+  const setView = useStore((s) => s.setView);
 
   const csvInput = useRef<HTMLInputElement>(null);
   const matrixInput = useRef<HTMLInputElement>(null);
@@ -84,7 +85,13 @@ export default function TopBar() {
   return (
     <>
       <header className="flex items-center gap-2 px-3 py-2 bg-white border-b border-slate-200">
-        <span className="font-bold text-slate-800 mr-1">Signframe Builder</span>
+        <button
+          onClick={() => setView('home')}
+          className="font-bold text-slate-800 mr-1 hover:text-brand-600"
+          title="Volver al inicio (elegir etapa)"
+        >
+          Signframe Builder
+        </button>
         <input
           value={project.name}
           onChange={(e) => setProjectName(e.target.value)}
