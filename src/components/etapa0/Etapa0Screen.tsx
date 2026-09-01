@@ -12,7 +12,14 @@ import {
   contarColisiones,
   type Instancia,
 } from '../../lib/etapa0/acroName';
+import { alinear, type Confianza } from '../../lib/etapa0/align';
 import PdfPreview from './PdfPreview';
+
+const CONF_STYLE: Record<string, string> = {
+  alta: 'bg-blue-50 text-blue-700',
+  media: 'bg-amber-50 text-amber-700',
+  revisar: 'bg-red-50 text-red-600',
+};
 
 const DESTINO_STYLE: Record<RowDestino, string> = {
   pdf: 'bg-emerald-50 text-emerald-700',
@@ -90,6 +97,39 @@ export default function Etapa0Screen() {
 
   const colisiones = useMemo(() => contarColisiones(nombres), [nombres]);
 
+  /** Solo las filas que van al PDF participan de la alineación. */
+  const filasPdf = useMemo(() => nombres.filter((n) => n.fila.destino === 'pdf'), [nombres]);
+
+  const align = useMemo(() => {
+    if (!pdf || filasPdf.length === 0) return null;
+    return alinear(
+      filasPdf.map((n) => ({
+        nombrePdf: n.fila.nombrePdf,
+        valor: n.fila.valor,
+        tipo: n.fila.tipo,
+        nombrePropuesto: n.nombre,
+      })),
+      pdf.leaves,
+    );
+  }, [pdf, filasPdf]);
+
+  /** leafName -> confianza, para pintar el overlay. */
+  const confianzaPorLeaf = useMemo(() => {
+    const m = new Map<string, Confianza>();
+    if (!align || !pdf) return m;
+    for (const a of align.asignaciones) {
+      for (const li of a.leafIdx) m.set(pdf.leaves[li].name, a.confianza);
+    }
+    return m;
+  }, [align, pdf]);
+
+  /** filaIdx (dentro de filasPdf) -> asignación */
+  const asigPorFila = useMemo(() => {
+    const m = new Map<number, (typeof align extends null ? never : NonNullable<typeof align>)['asignaciones'][number]>();
+    align?.asignaciones.forEach((a) => m.set(a.filaIdx, a));
+    return m;
+  }, [align]);
+
   const filasFicha = useMemo(() => {
     const base =
       filtro === 'todas'
@@ -121,7 +161,7 @@ export default function Etapa0Screen() {
         <span className="font-bold text-slate-800 flex items-center gap-1.5">
           <FileSignature size={16} /> Etapa 0 · Renombrado asistido
         </span>
-        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.2.0 · nombres propuestos</span>
+        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.3.0 · pre-alineación</span>
         <div className="flex-1" />
         <input ref={fichaInput} type="file" accept=".xlsx,.xls" hidden onChange={onFicha} />
         <input ref={pdfInput} type="file" accept="application/pdf,.pdf" hidden onChange={onPdf} />
@@ -156,6 +196,14 @@ export default function Etapa0Screen() {
                 />
               </>
             )}
+            {align && (
+              <>
+                <Stat n={`${align.stats.pctAlta}%`} l="confianza alta" tone="text-emerald-700" />
+                <Stat n={align.stats.media} l="media" tone="text-amber-600" />
+                <Stat n={align.stats.revisar} l="revisar" tone="text-red-600" />
+                <Stat n={align.stats.relaciones1aN} l="1:N" />
+              </>
+            )}
             {pdf && (
               <>
                 <Stat n={pdf.leaves.length} l="campos PDF" tone="text-brand-700" />
@@ -186,6 +234,18 @@ export default function Etapa0Screen() {
                 {l.name} ×{l.widgets.length} [p{l.paginas.map((x) => x + 1).join(',')}]
               </button>
             ))}
+          </div>
+        )}
+        {align && (align.huerfanosFicha.length > 0 || align.huerfanosPdf.length > 0) && (
+          <div className="mt-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-[11px] text-slate-600">
+            <b>Huérfanos</b> — {align.huerfanosFicha.length} fila(s) de ficha sin campo PDF ·{' '}
+            {align.huerfanosPdf.length} campo(s) PDF sin fila.{' '}
+            {align.huerfanosPdf.length > 0 && (
+              <span className="text-slate-400">
+                ({align.huerfanosPdf.slice(0, 8).map((i) => pdf!.leaves[i].name).join(', ')}
+                {align.huerfanosPdf.length > 8 ? '…' : ''})
+              </span>
+            )}
           </div>
         )}
         {Object.keys(colisiones).length > 0 && (
@@ -299,6 +359,8 @@ export default function Etapa0Screen() {
                   <tbody>
                     {filasFicha.map((n, i) => {
                       const r = n.fila;
+                      const idxEnPdf = filasPdf.indexOf(n);
+                      const asig = idxEnPdf >= 0 ? asigPorFila.get(idxEnPdf) : undefined;
                       return (
                         <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
                           <td className="px-2 py-1 text-slate-400 whitespace-nowrap">
@@ -320,9 +382,19 @@ export default function Etapa0Screen() {
                             {n.nombre}
                           </td>
                           <td className="px-2 py-1">
-                            <span className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`} title={r.motivo}>
-                              {r.motivo ?? r.destino}
-                            </span>
+                            {asig ? (
+                              <span
+                                className={`rounded px-1 ${CONF_STYLE[asig.confianza]}`}
+                                title={[...asig.motivos, `campo(s): ${asig.leafIdx.map((li) => pdf!.leaves[li].name).join(', ')}`].join(' · ')}
+                              >
+                                {asig.confianza}
+                                {asig.leafIdx.length > 1 ? ` 1:${asig.leafIdx.length}` : ''}
+                              </span>
+                            ) : (
+                              <span className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`} title={r.motivo}>
+                                {r.motivo ?? r.destino}
+                              </span>
+                            )}
                             {!r.hojaAplica && (
                               <span className="ml-1 rounded px-1 bg-red-50 text-red-500" title="La hoja no aplica a este formulario">
                                 hoja✕
@@ -370,7 +442,13 @@ export default function Etapa0Screen() {
 
         {/* Derecha: PDF con overlay */}
         <div className="w-1/2 min-w-0 rounded-md border border-slate-200 bg-white">
-          <PdfPreview file={pdfFile} leaves={pdf?.leaves ?? []} selected={selected} onSelect={setSelected} />
+          <PdfPreview
+            file={pdfFile}
+            leaves={pdf?.leaves ?? []}
+            selected={selected}
+            onSelect={setSelected}
+            confianza={confianzaPorLeaf}
+          />
         </div>
       </div>
     </div>

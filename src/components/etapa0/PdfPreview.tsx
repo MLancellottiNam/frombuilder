@@ -21,11 +21,14 @@ export default function PdfPreview({
   leaves,
   selected,
   onSelect,
+  confianza,
 }: {
   file: File | null;
   leaves: PdfLeaf[];
   selected: string | null;
   onSelect: (name: string) => void;
+  /** leafName -> confianza de la pre-alineación (pinta el overlay) */
+  confianza?: Map<string, string>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -182,6 +185,20 @@ export default function PdfPreview({
           <canvas ref={canvasRef} className="block bg-white" />
           {boxes.map((b, i) => {
             const isSel = b.leaf.name === selected;
+            // alta=azul · media/revisar=ámbar · sin asignar=gris
+            const conf = confianza?.get(b.leaf.name);
+            const tono =
+              conf === 'alta'
+                ? 'border-blue-500/80 bg-blue-500/15 hover:bg-blue-500/25'
+                : conf === 'media' || conf === 'revisar'
+                  ? 'border-amber-500/80 bg-amber-500/20 hover:bg-amber-500/30'
+                  : 'border-slate-400/70 bg-slate-400/10 hover:bg-slate-400/20';
+            const tonoBadge =
+              conf === 'alta'
+                ? 'bg-blue-100 text-blue-800'
+                : conf === 'media' || conf === 'revisar'
+                  ? 'bg-amber-100 text-amber-800'
+                  : 'bg-slate-200 text-slate-600';
             return (
               <button
                 key={i}
@@ -189,13 +206,13 @@ export default function PdfPreview({
                 title={`#${b.leaf.readingIndex} · ${b.leaf.name} · ${b.leaf.ft}`}
                 onClick={() => onSelect(b.leaf.name)}
                 className={`absolute border transition-colors ${
-                  isSel ? 'border-brand-600 bg-brand-500/25' : 'border-brand-500/70 bg-brand-500/10 hover:bg-brand-500/20'
+                  isSel ? 'border-brand-600 bg-brand-500/30 ring-1 ring-brand-600' : tono
                 }`}
                 style={{ left: b.left, top: b.top, width: b.width, height: b.height }}
               >
                 <span
                   className={`absolute left-0 -top-[13px] whitespace-nowrap rounded px-1 text-[9px] leading-[13px] font-mono ${
-                    isSel ? 'bg-brand-600 text-white' : 'bg-brand-100 text-brand-800'
+                    isSel ? 'bg-brand-600 text-white' : tonoBadge
                   }`}
                 >
                   {b.leaf.readingIndex}. {b.leaf.name}
