@@ -27,10 +27,15 @@ export type Selection =
   | { kind: 'subsection'; id: string }
   | null;
 
+/** Pantalla activa: inicio (elegir etapa), el workspace, o Etapa 0. */
+export type View = 'home' | 'builder' | 'etapa0';
+
 interface StoreState {
   project: Project;
   selection: Selection;
   collapsed: Record<string, boolean>;
+  view: View;
+  setView: (v: View) => void;
   /** Transient (not persisted): object URL + name of an attached PDF. */
   pdfUrl: string | null;
   pdfName: string | null;
@@ -173,6 +178,8 @@ export const useStore = create<StoreState>((set, get) => ({
   project: initialProject(),
   selection: null,
   collapsed: {},
+  view: 'home',
+  setView: (v) => set({ view: v }),
   pdfUrl: null,
   pdfName: null,
 
