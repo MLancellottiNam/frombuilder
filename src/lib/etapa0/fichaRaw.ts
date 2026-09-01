@@ -119,11 +119,19 @@ export interface RoutingEntry {
   secciones: string;
 }
 
+/** Fila con contenido que NO se contó como dato — para reconciliar totales. */
+export interface FilaIgnorada {
+  hoja: string;
+  fila: number;
+  motivo: string;
+}
+
 export interface FichaRawResult {
   rows: FichaRow[];
   sheets: SheetInfo[];
   routing: RoutingEntry[];
   bloquesExcluidos: BloqueExcluido[];
+  filasIgnoradas: FilaIgnorada[];
   warnings: string[];
   stats: {
     filasDatos: number;
@@ -139,8 +147,13 @@ export interface FichaRawResult {
 // --- detección de marcadores ------------------------------------------------
 
 /**
- * Un marcador "NO APLICA" puede estar en CUALQUIER celda de la hoja (columna y
- * fila varían por hoja). Se busca por substring sobre el texto normalizado.
+ * Un marcador "NO APLICA" puede estar en CUALQUIER celda (columna y fila varían
+ * por hoja), PERO hay que distinguirlo del valor de enum legítimo "No aplica"
+ * que las columnas J (Visualización) y N (Nombre interno en PDF) usan como dato.
+ *
+ * Un marcador real cumple las TRES condiciones:
+ *   contiene NO APLICA  &&  (contiene HOJA || SECCION)  &&  contiene FORMULARIO
+ * Además: nunca se escanean J ni N, y el marcador de BLOQUE solo vale en col G.
  */
 export interface Marcador {
   fila: number; // 1-based
@@ -149,17 +162,40 @@ export interface Marcador {
   alcance: 'hoja' | 'bloque';
 }
 
-export function findMarcadores(aoa: string[][]): Marcador[] {
+export function esTextoMarcador(raw: string): false | 'hoja' | 'bloque' {
+  const up = normUpper(raw);
+  if (!up.includes('NO APLICA')) return false;
+  if (!up.includes('FORMULARIO')) return false;
+  if (up.includes('HOJA')) return 'hoja';
+  if (up.includes('SECCION')) return 'bloque';
+  return false;
+}
+
+export interface MarcadorScanCols {
+  /** col G — única columna válida para marcadores de bloque */
+  regla?: number;
+  /** col J — enum "No aplica": nunca escanear */
+  visualizacion?: number;
+  /** col N — enum "No aplica": nunca escanear */
+  campoPdfInterno?: number;
+}
+
+export function findMarcadores(aoa: string[][], cols: MarcadorScanCols = {}): Marcador[] {
   const out: Marcador[] = [];
+  const ignorar = new Set<number>();
+  if (cols.visualizacion != null) ignorar.add(cols.visualizacion);
+  if (cols.campoPdfInterno != null) ignorar.add(cols.campoPdfInterno);
+
   for (let r = 0; r < aoa.length; r++) {
     const row = aoa[r] ?? [];
     for (let c = 0; c < row.length; c++) {
+      if (ignorar.has(c)) continue;
       const raw = String(row[c] ?? '');
       if (!raw.trim()) continue;
-      const up = normUpper(raw);
-      if (!up.includes('NO APLICA')) continue;
-      // HOJA -> toda la hoja; SECCION -> bloque desde esa fila.
-      const alcance: 'hoja' | 'bloque' = up.includes('HOJA') ? 'hoja' : 'bloque';
+      const alcance = esTextoMarcador(raw);
+      if (!alcance) continue;
+      // El marcador de bloque solo es válido en col G (Regla).
+      if (alcance === 'bloque' && cols.regla != null && c !== cols.regla) continue;
       out.push({ fila: r + 1, col: c, texto: raw.trim(), alcance });
     }
   }
@@ -262,6 +298,7 @@ export function buildFichaRaw(sheets: RawSheet[]): FichaRawResult {
   const rows: FichaRow[] = [];
   const sheetInfos: SheetInfo[] = [];
   const bloquesExcluidos: BloqueExcluido[] = [];
+  const filasIgnoradas: FilaIgnorada[] = [];
   let routing: RoutingEntry[] = [];
 
   for (const sheet of sheets) {
@@ -277,7 +314,13 @@ export function buildFichaRaw(sheets: RawSheet[]): FichaRawResult {
     }
 
     // 1) Marcadores. La detección corre ANTES de cualquier parseo de col G.
-    const marcadores = findMarcadores(sheet.aoa);
+    //    Se excluyen J y N (usan "No aplica" como enum) y el marcador de bloque
+    //    solo se acepta en col G.
+    const marcadores = findMarcadores(sheet.aoa, {
+      regla: header.cols.regla,
+      visualizacion: header.cols.visualizacion,
+      campoPdfInterno: header.cols.campoPdfInterno,
+    });
     const marcadorHoja = marcadores.find((m) => m.alcance === 'hoja');
     const marcadoresBloque = marcadores.filter((m) => m.alcance === 'bloque');
 
@@ -310,7 +353,9 @@ export function buildFichaRaw(sheets: RawSheet[]): FichaRawResult {
       // Fila vacía -> no es dato.
       if (row.every((c) => !String(c ?? '').trim())) continue;
       // El marcador en sí no es un campo.
-      const esMarcador = marcadores.some((m) => m.fila === fila);
+      const marcadoresFila = marcadores.filter((m) => m.fila === fila);
+      const esMarcador = marcadoresFila.length > 0;
+      const colsMarcador = new Set(marcadoresFila.map((m) => m.col));
 
       const rec: FichaRow = {
         hoja: sheet.name,
@@ -333,9 +378,20 @@ export function buildFichaRaw(sheets: RawSheet[]): FichaRawResult {
         destino: 'excluida',
       };
 
-      // Una fila sin ningún contenido útil (solo el marcador) no cuenta.
-      const tieneContenido = !!(rec.label || rec.nombrePdf || rec.campoJson || rec.pasos);
-      if (!tieneContenido) continue;
+      // Es fila de datos si alguna columna MAPEADA tiene contenido, sin contar
+      // la celda del propio marcador (una fila que solo trae el marcador es una
+      // anotación, no un campo).
+      const tieneContenido = Object.entries(header.cols).some(([, idx]) => {
+        if (idx == null || colsMarcador.has(idx)) return false;
+        return String(row[idx] ?? '').trim() !== '';
+      });
+      if (!tieneContenido) {
+        // Contenido solo en columnas no mapeadas (p.ej. la col O vacía/reservada).
+        if (!esMarcador && row.some((c) => String(c ?? '').trim())) {
+          filasIgnoradas.push({ hoja: sheet.name, fila, motivo: 'sin contenido en columnas mapeadas' });
+        }
+        continue;
+      }
 
       filasDatos++;
 
@@ -382,7 +438,7 @@ export function buildFichaRaw(sheets: RawSheet[]): FichaRawResult {
 
   if (hojasNodo === 0) warnings.push('No se detectó ninguna hoja de nodo (header de 14 columnas).');
 
-  return { rows, sheets: sheetInfos, routing, bloquesExcluidos, warnings, stats };
+  return { rows, sheets: sheetInfos, routing, bloquesExcluidos, filasIgnoradas, warnings, stats };
 }
 
 // --- carga del archivo (xlsx lazy) -----------------------------------------

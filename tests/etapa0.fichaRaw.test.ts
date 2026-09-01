@@ -47,12 +47,17 @@ const sheets: RawSheet[] = [
     ],
   },
   {
+    // Reproduce el bug real: en el CSC esta hoja tiene 28 celdas "No aplica"
+    // en col J y col N (valor de enum), y CERO exclusiones de bloque.
     name: 'encabezado',
     aoa: [
       HEADER,
-      row({ A: 'JSON', B: 'JSON', C: 'No se llena en PDF', D: 'Tipo Tramite', M: 'encabezado.codigoTipoTramite' }),
-      row({ A: 'Datos Generales', B: 'Solicitud', C: 'Nombre del asegurado', D: 'Nombre', E: 'Texto', M: 'encabezado.nombre' }),
-      row({ A: 'Datos Generales', B: 'Solicitud', C: '', D: 'Segundo Nombre', E: 'Texto', M: 'encabezado.segundoNombre' }),
+      row({ A: 'JSON', B: 'JSON', C: 'No se llena en PDF', D: 'Tipo Tramite', J: 'No Aplica', N: 'No aplica', M: 'encabezado.codigoTipoTramite' }),
+      row({ A: 'JSON', B: 'JSON', C: 'No se llena en PDF', D: 'Correo', J: 'No Aplica', N: 'No aplica', M: 'encabezado.correo' }),
+      row({ A: 'Datos Generales', B: 'Solicitud', C: 'Nombre del asegurado', D: 'Nombre', E: 'Texto', J: 'editable', M: 'encabezado.nombre' }),
+      row({ A: 'Datos Generales', B: 'Solicitud', C: '', D: 'Segundo Nombre', E: 'Texto', J: 'No Aplica', M: 'encabezado.segundoNombre' }),
+      // fila con contenido SOLO en una columna mapeada distinta de las 4 "clásicas"
+      row({ F: 'Colones' }),
     ],
   },
   {
@@ -110,8 +115,21 @@ ok(res.sheets.find((s) => s.name === 'riesgo')?.aplica === false, 'riesgo exclui
 // --- índice ---
 ok(res.routing.length === 2 && res.routing[0].nodo === 'encabezado', 'índice parseado (nodo -> paso -> secciones)');
 
-// --- bloques ---
-ok(res.stats.bloquesExcluidos === 2, `2 bloques excluidos en personas (got ${res.stats.bloquesExcluidos})`);
+// --- bloques (BUG FIX: encabezado no debe generar ninguno) ---
+ok(res.stats.bloquesExcluidos === 2, `2 bloques excluidos en total (got ${res.stats.bloquesExcluidos})`);
+ok(
+  res.bloquesExcluidos.every((b) => b.hoja === 'personas'),
+  'los bloques excluidos son SOLO de personas (encabezado: 0 falsos positivos)',
+);
+ok(
+  res.rows.filter((r) => r.hoja === 'encabezado' && r.motivo === 'bloque-no-aplica').length === 0,
+  'ninguna fila de encabezado quedó excluida por bloque',
+);
+// una fila con contenido solo en col F igual cuenta como dato (conteo total)
+ok(
+  res.rows.some((r) => r.hoja === 'encabezado' && r.valor === 'Colones'),
+  'fila con contenido solo en col F se cuenta como dato',
+);
 const tomador = res.rows.find((r) => r.label === 'Nombre tomador')!;
 ok(tomador?.destino === 'excluida' && tomador.motivo === 'bloque-no-aplica', 'fila del bloque TOM excluida');
 const rpl = res.rows.find((r) => r.label === 'Nombre' && r.hoja === 'personas' && r.pasos === 'RPL')!;
@@ -143,8 +161,38 @@ ok(res.stats.pdf + res.stats.soloJson + res.stats.excluidas === res.stats.filasD
 // --- marcadores: normalización y alcance ---
 const m = findMarcadores([['', 'sección   no   aplica para este formulario']]);
 ok(m.length === 1 && m[0].alcance === 'bloque', 'marcador normalizado (acentos/espacios) -> bloque');
-const m2 = findMarcadores([['ESTA HOJA NO APLICA'], ['x']]);
+const m2 = findMarcadores([['ESTA HOJA NO APLICA PARA EL FORMULARIO'], ['x']]);
 ok(m2[0]?.alcance === 'hoja', 'texto con HOJA -> alcance hoja');
+
+// --- BUG FIX: "No aplica" como enum en col J / N NO es marcador -------------
+ok(findMarcadores([['No aplica']]).length === 0, 'enum "No aplica" solo NO es marcador (falta HOJA/SECCIÓN y FORMULARIO)');
+ok(findMarcadores([['No Aplica', 'No aplica']]).length === 0, 'varias celdas "No aplica" no generan marcadores');
+ok(
+  findMarcadores([['SECCIÓN NO APLICA']]).length === 0,
+  'sin la palabra FORMULARIO no es marcador',
+);
+// col J (idx 9) y col N (idx 13) nunca se escanean, aunque tuvieran el texto completo
+const filaJN: string[][] = [[]];
+filaJN[0][9] = 'SECCIÓN NO APLICA PARA ESTE FORMULARIO';
+filaJN[0][13] = 'ESTA HOJA NO APLICA PARA EL FORMULARIO';
+ok(
+  findMarcadores(filaJN, { regla: 6, visualizacion: 9, campoPdfInterno: 13 }).length === 0,
+  'J y N nunca se escanean',
+);
+// el marcador de bloque solo vale en col G (idx 6)
+const bloqueFueraDeG: string[][] = [[]];
+bloqueFueraDeG[0][2] = 'SECCIÓN NO APLICA PARA ESTE FORMULARIO';
+ok(
+  findMarcadores(bloqueFueraDeG, { regla: 6 }).length === 0,
+  'marcador de bloque fuera de col G se ignora',
+);
+const bloqueEnG: string[][] = [[]];
+bloqueEnG[0][6] = 'SECCIÓN NO APLICA PARA ESTE FORMULARIO';
+ok(findMarcadores(bloqueEnG, { regla: 6 })[0]?.alcance === 'bloque', 'marcador de bloque en col G sí vale');
+// el marcador de HOJA sí puede estar en cualquier columna (menos J/N)
+const hojaEnC: string[][] = [[]];
+hojaEnC[0][2] = 'ESTA HOJA NO APLICA PARA EL FORMULARIO';
+ok(findMarcadores(hojaEnC, { regla: 6 })[0]?.alcance === 'hoja', 'marcador de HOJA vale fuera de col G');
 
 // --------------------------------------------------------------------------
 // Fixture REAL (opcional, gitignoreado).

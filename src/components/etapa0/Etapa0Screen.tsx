@@ -76,6 +76,13 @@ export default function Etapa0Screen() {
               <Stat n={res.stats.soloJson} l="solo JSON" />
             </div>
 
+            {res.filasIgnoradas.length > 0 && (
+              <div className="mt-3 rounded-md border border-slate-300 bg-white px-3 py-2 text-xs text-slate-600">
+                <b>{res.filasIgnoradas.length} fila(s) con contenido no contadas</b> (para reconciliar el total):{' '}
+                {res.filasIgnoradas.map((f) => `${f.hoja} R${f.fila}`).join(', ')}
+              </div>
+            )}
+
             {res.warnings.length > 0 && (
               <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                 {res.warnings.map((w, i) => (
