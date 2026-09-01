@@ -28,6 +28,10 @@ export interface MatrixMapping {
   condition?: string;
   required?: string; // col H
   visualization?: string; // col J — readOnly / hidden
+  /** col C — "Nombre en PDF" (texto físico del PDF). Lo usa Etapa 0. */
+  nombrePdf?: string;
+  /** col L — "Nombre de la sección del JSON" (nodo destino). Lo usa Etapa 0. */
+  seccionJson?: string;
 }
 
 /**
@@ -111,6 +115,10 @@ export function guessMatrixMapping(headers: string[]): MatrixMapping {
     required: find('obligatorio', 'requerido', 'required', 'mandatorio'),
     // J: "Visualización en Formularios"
     visualization: find('visualizacion', 'visualización', 'estado'),
+    // C: "Nombre en PDF" — solo detección; readMatrix no lo usa (Etapa 0 sí).
+    nombrePdf: find('nombre en pdf'),
+    // L: "Nombre de la sección del JSON" — idem.
+    seccionJson: find('nombre de la seccion del json', 'seccion del json'),
   };
   // section and subsection must not collapse onto the same column.
   if (m.subsection && m.subsection === m.section) m.subsection = undefined;
