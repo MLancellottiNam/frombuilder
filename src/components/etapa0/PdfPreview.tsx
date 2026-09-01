@@ -22,6 +22,8 @@ export default function PdfPreview({
   selected,
   onSelect,
   confianza,
+  nombreFinal,
+  colisiones,
 }: {
   file: File | null;
   leaves: PdfLeaf[];
@@ -29,6 +31,10 @@ export default function PdfPreview({
   onSelect: (name: string) => void;
   /** leafName -> confianza de la pre-alineación (pinta el overlay) */
   confianza?: Map<string, string>;
+  /** leafName(actual) -> nombre final que va a escribirse */
+  nombreFinal?: Map<string, string>;
+  /** nombres finales duplicados: se pintan en rojo y bloquean la descarga */
+  colisiones?: Set<string>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -187,13 +193,19 @@ export default function PdfPreview({
             const isSel = b.leaf.name === selected;
             // alta=azul · media/revisar=ámbar · sin asignar=gris
             const conf = confianza?.get(b.leaf.name);
-            const tono =
+            const final = nombreFinal?.get(b.leaf.name) ?? b.leaf.name;
+            const choca = colisiones?.has(final) ?? false;
+            const tono = choca
+              ? 'border-red-500 bg-red-500/25 hover:bg-red-500/35'
+              :
               conf === 'alta'
                 ? 'border-blue-500/80 bg-blue-500/15 hover:bg-blue-500/25'
                 : conf === 'media' || conf === 'revisar'
                   ? 'border-amber-500/80 bg-amber-500/20 hover:bg-amber-500/30'
                   : 'border-slate-400/70 bg-slate-400/10 hover:bg-slate-400/20';
-            const tonoBadge =
+            const tonoBadge = choca
+              ? 'bg-red-600 text-white'
+              :
               conf === 'alta'
                 ? 'bg-blue-100 text-blue-800'
                 : conf === 'media' || conf === 'revisar'
@@ -215,7 +227,7 @@ export default function PdfPreview({
                     isSel ? 'bg-brand-600 text-white' : tonoBadge
                   }`}
                 >
-                  {b.leaf.readingIndex}. {b.leaf.name}
+                  {b.leaf.readingIndex}. {final}
                 </span>
               </button>
             );

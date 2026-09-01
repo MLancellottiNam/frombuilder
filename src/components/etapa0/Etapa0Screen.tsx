@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Upload, FileSignature, FileText, Search } from 'lucide-react';
 import { useStore } from '../../store/store';
 import { Button } from '../ui';
@@ -13,6 +13,7 @@ import {
   type Instancia,
 } from '../../lib/etapa0/acroName';
 import { alinear, type Confianza } from '../../lib/etapa0/align';
+import TablaCampos, { nombreEfectivo, type Ediciones } from './TablaCampos';
 import PdfPreview from './PdfPreview';
 
 const CONF_STYLE: Record<string, string> = {
@@ -51,6 +52,7 @@ export default function Etapa0Screen() {
   const [hojaInstanciable, setHojaInstanciable] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
+  const [ediciones, setEdiciones] = useState<Ediciones>({});
 
   const onFicha = async () => {
     const f = fichaInput.current?.files?.[0];
@@ -113,6 +115,48 @@ export default function Etapa0Screen() {
     );
   }, [pdf, filasPdf]);
 
+  // Siembra las ediciones con lo que propuso la pre-alineación. Nunca pisa lo
+  // que el usuario tocó a mano (`manual`).
+  useEffect(() => {
+    if (!align || !pdf) return;
+    setEdiciones((prev) => {
+      const next: Ediciones = { ...prev };
+      for (const a of align.asignaciones) {
+        const propuesto = filasPdf[a.filaIdx]?.nombre ?? '';
+        a.leafIdx.forEach((li, parte) => {
+          if (next[li]?.manual) return;
+          // En una relación 1:N cada caja necesita nombre propio; se numeran por
+          // posición (estructural, no es desambiguación de colisión).
+          const nombre = propuesto && a.leafIdx.length > 1 ? `${propuesto}_${parte + 1}` : propuesto;
+          next[li] = {
+            nombreNuevo: nombre,
+            filaIdx: a.filaIdx,
+            tipo: pdf.leaves[li].ft,
+            manual: false,
+          };
+        });
+      }
+      return next;
+    });
+  }, [align, pdf, filasPdf]);
+
+  /** Nombre final de cada campo (editado o el actual) + colisiones. */
+  const colisionesPdf = useMemo(() => {
+    const cuenta = new Map<string, number>();
+    (pdf?.leaves ?? []).forEach((l, i) => {
+      const n = nombreEfectivo(l, ediciones[i]);
+      cuenta.set(n, (cuenta.get(n) ?? 0) + 1);
+    });
+    return new Set([...cuenta.entries()].filter(([, c]) => c > 1).map(([n]) => n));
+  }, [pdf, ediciones]);
+
+  /** leafName(actual) -> nombre final, para el badge del overlay. */
+  const nombreFinalPorLeaf = useMemo(() => {
+    const m = new Map<string, string>();
+    (pdf?.leaves ?? []).forEach((l, i) => m.set(l.name, nombreEfectivo(l, ediciones[i])));
+    return m;
+  }, [pdf, ediciones]);
+
   /** leafName -> confianza, para pintar el overlay. */
   const confianzaPorLeaf = useMemo(() => {
     const m = new Map<string, Confianza>();
@@ -145,11 +189,6 @@ export default function Etapa0Screen() {
       : base;
   }, [nombres, filtro, q]);
 
-  const leavesFiltradas = useMemo(() => {
-    if (!pdf) return [];
-    const s = q.toLowerCase();
-    return s ? pdf.leaves.filter((l) => l.name.toLowerCase().includes(s)) : pdf.leaves;
-  }, [pdf, q]);
 
   return (
     <div className="h-screen flex flex-col bg-slate-100">
@@ -161,7 +200,7 @@ export default function Etapa0Screen() {
         <span className="font-bold text-slate-800 flex items-center gap-1.5">
           <FileSignature size={16} /> Etapa 0 · Renombrado asistido
         </span>
-        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.3.0 · pre-alineación</span>
+        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.4.0 · corrección manual</span>
         <div className="flex-1" />
         <input ref={fichaInput} type="file" accept=".xlsx,.xls" hidden onChange={onFicha} />
         <input ref={pdfInput} type="file" accept="application/pdf,.pdf" hidden onChange={onPdf} />
@@ -246,6 +285,13 @@ export default function Etapa0Screen() {
                 {align.huerfanosPdf.length > 8 ? '…' : ''})
               </span>
             )}
+          </div>
+        )}
+        {colisionesPdf.size > 0 && (
+          <div className="mt-2 rounded-md border border-red-400 bg-red-50 px-3 py-2 text-[11px] text-red-700">
+            <b>{colisionesPdf.size} colisión(es) de nombre en el PDF</b> — bloquean la descarga del PDF renombrado hasta
+            resolverlas: {[...colisionesPdf].slice(0, 10).join(' · ')}
+            {colisionesPdf.size > 10 ? '…' : ''}
           </div>
         )}
         {Object.keys(colisiones).length > 0 && (
@@ -410,34 +456,22 @@ export default function Etapa0Screen() {
             </>
           )}
 
-          {tab === 'pdf' && (
-            <div className="flex-1 overflow-auto scroll-thin">
-              {!pdf && <p className="text-xs text-slate-400 p-4 text-center">Cargá el PDF crudo.</p>}
-              <table className="w-full text-[11px]">
-                <tbody>
-                  {leavesFiltradas.map((l) => (
-                    <tr
-                      key={l.name + l.readingIndex}
-                      onClick={() => setSelected(l.name)}
-                      className={`border-b border-slate-50 cursor-pointer ${
-                        selected === l.name ? 'bg-brand-50' : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <td className="px-2 py-1 text-slate-400 w-8 text-right">{l.readingIndex}</td>
-                      <td className="px-2 py-1 font-mono text-slate-700 truncate max-w-[240px]" title={l.name}>
-                        {l.name}
-                      </td>
-                      <td className="px-2 py-1 text-slate-400">{l.ft.replace('/', '')}</td>
-                      <td className="px-2 py-1 text-slate-400">p{l.page + 1}</td>
-                      <td className="px-2 py-1 text-slate-300">
-                        {l.widgets.length > 1 ? `${l.widgets.length}w` : ''}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          {tab === 'pdf' &&
+            (!pdf ? (
+              <p className="text-xs text-slate-400 p-4 text-center">Cargá el PDF crudo.</p>
+            ) : (
+              <TablaCampos
+                leaves={pdf.leaves}
+                filasPdf={filasPdf}
+                ediciones={ediciones}
+                setEdiciones={setEdiciones}
+                confianzaPorLeaf={confianzaPorLeaf}
+                colisiones={colisionesPdf}
+                selected={selected}
+                onSelect={setSelected}
+                query={q}
+              />
+            ))}
         </div>
 
         {/* Derecha: PDF con overlay */}
@@ -448,6 +482,8 @@ export default function Etapa0Screen() {
             selected={selected}
             onSelect={setSelected}
             confianza={confianzaPorLeaf}
+            nombreFinal={nombreFinalPorLeaf}
+            colisiones={colisionesPdf}
           />
         </div>
       </div>
