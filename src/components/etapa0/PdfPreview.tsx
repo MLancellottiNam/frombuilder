@@ -125,6 +125,11 @@ export default function PdfPreview({
     el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }, [selected, leaves]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A.2: si el campo seleccionado tiene widgets en varias páginas, avisarlo.
+  // Todos sus widgets se resaltan; los de otra página no se ven en este canvas.
+  const selLeaf = selected ? leaves.find((l) => l.name === selected) : undefined;
+  const selMultiPagina = selLeaf && selLeaf.paginas.length > 1 ? selLeaf.paginas.map((x) => x + 1) : null;
+
   if (!file) {
     return (
       <div className="h-full flex items-center justify-center text-xs text-slate-400 px-6 text-center">
@@ -162,6 +167,11 @@ export default function PdfPreview({
           <ZoomIn size={15} />
         </button>
         <span className="text-slate-400 ml-2">{boxes.length} widgets en esta página</span>
+        {selMultiPagina && (
+          <span className="ml-2 rounded bg-amber-100 text-amber-800 px-1.5 py-0.5 text-[10px]">
+            «{selected}» tiene widgets en las páginas {selMultiPagina.join(', ')}
+          </span>
+        )}
       </div>
 
       {error && <p className="text-xs text-red-600 p-3">No se pudo renderizar: {error}</p>}

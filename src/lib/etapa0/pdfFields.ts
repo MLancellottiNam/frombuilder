@@ -43,6 +43,14 @@ export interface PdfLeaf {
   widgets: PdfWidget[];
   /** 1-based, tras ordenar por (page, -Y, X) */
   readingIndex: number;
+  /**
+   * Un /Btn con varios widgets es normal (grupo de radios/checkboxes). Un /Tx
+   * con más de un widget es sospechoso: suele ser una colisión real del PDF
+   * (dos campos distintos que pintan el mismo valor). No se resuelve solo.
+   */
+  multiWidgetSospechoso: boolean;
+  /** páginas donde aparece (útil cuando el campo cruza páginas) */
+  paginas: number[];
 }
 
 export interface PdfFieldsResult {
@@ -51,6 +59,8 @@ export interface PdfFieldsResult {
   pageSizes: { width: number; height: number }[];
   /** nombres repetidos en el propio PDF (colisiones preexistentes) */
   duplicados: Record<string, number>;
+  /** campos /Tx con más de un widget (colisiones sospechosas, §11.1) */
+  sospechosos: PdfLeaf[];
   totalWidgets: number;
   warnings: string[];
 }
@@ -108,7 +118,8 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
     return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
   };
 
-  const leaves: Omit<PdfLeaf, 'readingIndex'>[] = [];
+  // campos crudos; readingIndex/paginas/multiWidgetSospechoso se calculan al final
+  const leaves: Omit<PdfLeaf, 'readingIndex' | 'paginas' | 'multiWidgetSospechoso'>[] = [];
   const seen = new Set<string>(); // evita loops por refs repetidas
 
   const walk = (
@@ -198,7 +209,15 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
 
   // Orden de lectura (page, -Y, X).
   leaves.sort(compareReadingOrder);
-  const ordered: PdfLeaf[] = leaves.map((l, i) => ({ ...l, readingIndex: i + 1 }));
+  const ordered: PdfLeaf[] = leaves.map((l, i) => {
+    const paginas = Array.from(new Set(l.widgets.map((w) => w.page))).sort((a, b) => a - b);
+    return {
+      ...l,
+      readingIndex: i + 1,
+      paginas,
+      multiWidgetSospechoso: l.ft === '/Tx' && l.widgets.length > 1,
+    };
+  });
 
   // Colisiones de nombre preexistentes en el propio PDF.
   const counts = new Map<string, number>();
@@ -206,6 +225,13 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
   const duplicados: Record<string, number> = {};
   for (const [n, c] of counts) if (c > 1) duplicados[n] = c;
 
+  const sospechosos = ordered.filter((l) => l.multiWidgetSospechoso);
+  if (sospechosos.length > 0) {
+    warnings.push(
+      `${sospechosos.length} campo(s) /Tx con varios widgets (posible colisión del PDF): ` +
+        sospechosos.map((l) => `${l.name} ×${l.widgets.length} [p${l.paginas.map((p) => p + 1).join(',')}]`).join(' · '),
+    );
+  }
   const sigs = ordered.filter((l) => l.ft === '/Sig').length;
   if (sigs === 0) warnings.push('El PDF no tiene campos de firma (/Sig): las firmas serán líneas dibujadas.');
 
@@ -214,6 +240,7 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
     pageCount: pages.length,
     pageSizes,
     duplicados,
+    sospechosos,
     totalWidgets: ordered.reduce((n, l) => n + l.widgets.length, 0),
     warnings,
   };

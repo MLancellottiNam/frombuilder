@@ -4,6 +4,14 @@ import { useStore } from '../../store/store';
 import { Button } from '../ui';
 import { readFichaRaw, type FichaRawResult, type RowDestino } from '../../lib/etapa0/fichaRaw';
 import { readPdfFields, type PdfFieldsResult } from '../../lib/etapa0/pdfFields';
+import {
+  detectarBloquesInstanciables,
+  instanciasPorDefecto,
+  expandirInstancias,
+  generarNombres,
+  contarColisiones,
+  type Instancia,
+} from '../../lib/etapa0/acroName';
 import PdfPreview from './PdfPreview';
 
 const DESTINO_STYLE: Record<RowDestino, string> = {
@@ -31,7 +39,9 @@ export default function Etapa0Screen() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'ficha' | 'pdf'>('ficha');
-  const [filtro, setFiltro] = useState<RowDestino | 'todas'>('pdf');
+  const [filtro, setFiltro] = useState<RowDestino | 'todas' | 'colision'>('pdf');
+  const [instancias, setInstancias] = useState<Instancia[]>([]);
+  const [hojaInstanciable, setHojaInstanciable] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -40,7 +50,16 @@ export default function Etapa0Screen() {
     if (!f) return;
     setError(null);
     try {
-      setFicha(await readFichaRaw(f));
+      const r = await readFichaRaw(f);
+      setFicha(r);
+      const bloques = detectarBloquesInstanciables(r.rows);
+      if (bloques.length > 0) {
+        setHojaInstanciable(bloques[0].hoja);
+        setInstancias(instanciasPorDefecto(bloques[0].codigos));
+      } else {
+        setHojaInstanciable(null);
+        setInstancias([]);
+      }
     } catch (e) {
       setError('Ficha: ' + String(e));
     }
@@ -61,14 +80,30 @@ export default function Etapa0Screen() {
     if (pdfInput.current) pdfInput.current.value = '';
   };
 
-  const filasFicha = useMemo(() => {
+  const nombres = useMemo(() => {
     if (!ficha) return [];
-    const base = filtro === 'todas' ? ficha.rows : ficha.rows.filter((r) => r.destino === filtro);
+    const expandidas = hojaInstanciable
+      ? expandirInstancias(ficha.rows, hojaInstanciable, instancias)
+      : ficha.rows.map((r) => ({ ...r, instancia: null, indiceInstancia: null }));
+    return generarNombres(expandidas);
+  }, [ficha, hojaInstanciable, instancias]);
+
+  const colisiones = useMemo(() => contarColisiones(nombres), [nombres]);
+
+  const filasFicha = useMemo(() => {
+    const base =
+      filtro === 'todas'
+        ? nombres
+        : filtro === 'colision'
+          ? nombres.filter((n) => n.colision)
+          : nombres.filter((n) => n.fila.destino === filtro);
     const s = q.toLowerCase();
     return s
-      ? base.filter((r) => (r.nombrePdf + r.label + r.campoJson + r.hoja).toLowerCase().includes(s))
+      ? base.filter((n) =>
+          (n.fila.nombrePdf + n.fila.label + n.fila.campoJson + n.fila.hoja + n.nombre).toLowerCase().includes(s),
+        )
       : base;
-  }, [ficha, filtro, q]);
+  }, [nombres, filtro, q]);
 
   const leavesFiltradas = useMemo(() => {
     if (!pdf) return [];
@@ -86,7 +121,7 @@ export default function Etapa0Screen() {
         <span className="font-bold text-slate-800 flex items-center gap-1.5">
           <FileSignature size={16} /> Etapa 0 · Renombrado asistido
         </span>
-        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.1.0 · lectura</span>
+        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.2.0 · nombres propuestos</span>
         <div className="flex-1" />
         <input ref={fichaInput} type="file" accept=".xlsx,.xls" hidden onChange={onFicha} />
         <input ref={pdfInput} type="file" accept="application/pdf,.pdf" hidden onChange={onPdf} />
@@ -113,6 +148,12 @@ export default function Etapa0Screen() {
                 <Stat n={ficha.stats.pdf} l="van al PDF" tone="text-emerald-700" />
                 <Stat n={ficha.stats.soloJson} l="solo JSON" />
                 <Stat n={ficha.stats.excluidas} l="excluidas" tone="text-red-600" />
+                <Stat n={ficha.stats.filasMarcadorHoja} l="marcador hoja" />
+                <Stat
+                  n={Object.keys(colisiones).length}
+                  l="colisiones"
+                  tone={Object.keys(colisiones).length ? 'text-red-600' : 'text-slate-700'}
+                />
               </>
             )}
             {pdf && (
@@ -120,16 +161,37 @@ export default function Etapa0Screen() {
                 <Stat n={pdf.leaves.length} l="campos PDF" tone="text-brand-700" />
                 <Stat n={pdf.totalWidgets} l="widgets" />
                 <Stat n={pdf.pageCount} l="páginas" />
-                <Stat n={Object.keys(pdf.duplicados).length} l="nombres dup." tone="text-red-600" />
+                <Stat
+                  n={pdf.sospechosos.length}
+                  l="multi-widget /Tx"
+                  tone={pdf.sospechosos.length ? 'text-amber-600' : 'text-slate-700'}
+                />
               </>
             )}
           </div>
         )}
 
-        {pdf && Object.keys(pdf.duplicados).length > 0 && (
+        {pdf && pdf.sospechosos.length > 0 && (
+          <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+            <b>{pdf.sospechosos.length} campo(s) /Tx con varios widgets</b> — un /Btn multi-widget es normal (grupo de
+            radios), pero un /Tx no: suele ser una colisión del PDF original. Clickeá uno para resaltar todos sus
+            widgets.{' '}
+            {pdf.sospechosos.map((l) => (
+              <button
+                key={l.name}
+                onClick={() => setSelected(l.name)}
+                className="underline decoration-dotted mr-2"
+                title={`páginas ${l.paginas.map((x) => x + 1).join(', ')}`}
+              >
+                {l.name} ×{l.widgets.length} [p{l.paginas.map((x) => x + 1).join(',')}]
+              </button>
+            ))}
+          </div>
+        )}
+        {Object.keys(colisiones).length > 0 && (
           <div className="mt-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-[11px] text-red-700">
-            <b>Colisiones ya existentes en el PDF</b> (no se resuelven solas, hay que revisarlas):{' '}
-            {Object.entries(pdf.duplicados).map(([n, c]) => `${n} ×${c}`).join(' · ')}
+            <b>Colisiones entre nombres propuestos</b> (se marcan, no se desambiguan solas):{' '}
+            {Object.entries(colisiones).map(([n, c]) => `${n} ×${c}`).join(' · ')}
           </div>
         )}
         {ficha && ficha.filasIgnoradas.length > 0 && (
@@ -139,6 +201,52 @@ export default function Etapa0Screen() {
           </div>
         )}
       </div>
+
+      {/* Instancias */}
+      {hojaInstanciable && instancias.length > 0 && (
+        <div className="px-3 pb-2 shrink-0">
+          <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+            <div className="text-[11px] font-medium text-slate-600 mb-1">
+              Instancias del bloque <code>{hojaInstanciable}</code> — el PDF lo repite una vez por instancia.
+              Los índices son decisión tuya.
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {instancias.map((inst, i) => (
+                <div key={inst.codigo} className="flex items-center gap-1.5 text-[11px]">
+                  <input
+                    type="checkbox"
+                    checked={inst.activa}
+                    onChange={(e) =>
+                      setInstancias((prev) => prev.map((x, j) => (j === i ? { ...x, activa: e.target.checked } : x)))
+                    }
+                  />
+                  <span className="font-medium text-slate-700 w-10">{inst.codigo}</span>
+                  <label className="text-slate-400">prefijo</label>
+                  <input
+                    value={inst.prefijo}
+                    onChange={(e) =>
+                      setInstancias((prev) => prev.map((x, j) => (j === i ? { ...x, prefijo: e.target.value } : x)))
+                    }
+                    className="w-20 rounded border border-slate-300 px-1 py-0.5 font-mono"
+                  />
+                  <label className="text-slate-400">personas[</label>
+                  <input
+                    type="number"
+                    value={inst.indice}
+                    onChange={(e) =>
+                      setInstancias((prev) =>
+                        prev.map((x, j) => (j === i ? { ...x, indice: Number(e.target.value) } : x)),
+                      )
+                    }
+                    className="w-12 rounded border border-slate-300 px-1 py-0.5"
+                  />
+                  <span className="text-slate-400">]</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Dos paneles */}
       <div className="flex-1 min-h-0 flex gap-2 px-3 pb-3">
@@ -173,7 +281,7 @@ export default function Etapa0Screen() {
           {tab === 'ficha' && (
             <>
               <div className="flex gap-1 px-2 py-1 border-b border-slate-100">
-                {(['pdf', 'solo-json', 'excluida', 'todas'] as const).map((f) => (
+                {(['pdf', 'solo-json', 'excluida', 'colision', 'todas'] as const).map((f) => (
                   <button
                     key={f}
                     onClick={() => setFiltro(f)}
@@ -189,25 +297,41 @@ export default function Etapa0Screen() {
                 {!ficha && <p className="text-xs text-slate-400 p-4 text-center">Cargá la ficha cruda (.xlsx).</p>}
                 <table className="w-full text-[11px]">
                   <tbody>
-                    {filasFicha.map((r, i) => (
-                      <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
-                        <td className="px-2 py-1 text-slate-400 whitespace-nowrap">
-                          {r.hoja}·{r.fila}
-                        </td>
-                        <td className="px-2 py-1 text-slate-700 truncate max-w-[160px]" title={r.nombrePdf}>
-                          {r.nombrePdf}
-                        </td>
-                        <td className="px-2 py-1 text-slate-500 truncate max-w-[140px]" title={r.label}>
-                          {r.label}
-                        </td>
-                        <td className="px-2 py-1 text-slate-400 truncate max-w-[90px]">{r.valor}</td>
-                        <td className="px-2 py-1">
-                          <span className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`} title={r.motivo}>
-                            {r.destino}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {filasFicha.map((n, i) => {
+                      const r = n.fila;
+                      return (
+                        <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                          <td className="px-2 py-1 text-slate-400 whitespace-nowrap">
+                            {r.hoja}·{r.fila}
+                            {r.instancia && (
+                              <span className="ml-1 text-brand-600">{r.instancia.codigo}[{r.indiceInstancia}]</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1 text-slate-700 truncate max-w-[150px]" title={r.nombrePdf}>
+                            {r.nombrePdf}
+                          </td>
+                          <td className="px-2 py-1 text-slate-400 truncate max-w-[80px]">{r.valor}</td>
+                          <td
+                            className={`px-2 py-1 font-mono truncate max-w-[190px] ${
+                              n.colision ? 'text-red-600 font-semibold' : 'text-brand-700'
+                            }`}
+                            title={n.colision ? `COLISIÓN: ${n.nombre}` : n.nombre}
+                          >
+                            {n.nombre}
+                          </td>
+                          <td className="px-2 py-1">
+                            <span className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`} title={r.motivo}>
+                              {r.motivo ?? r.destino}
+                            </span>
+                            {!r.hojaAplica && (
+                              <span className="ml-1 rounded px-1 bg-red-50 text-red-500" title="La hoja no aplica a este formulario">
+                                hoja✕
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

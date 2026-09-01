@@ -85,6 +85,8 @@ const sheets: RawSheet[] = [
     aoa: [
       HEADER,
       row({ A: 'Póliza', B: 'Madre', C: 'Numero poliza', D: 'Numero', M: 'polizaMadre.numero' }),
+      // fila de CONTRATO dentro de una hoja que NO aplica (precedencia JSON-first)
+      row({ A: 'JSON', B: 'JSON', C: 'No se llena en PDF', D: 'Cod poliza', M: 'polizaMadre.codigo' }),
       row({ C: 'ESTA HOJA NO APLICA PARA EL FORMULARIO CONOZCA A SU CLIENTE' }),
     ],
   },
@@ -145,7 +147,7 @@ ok(segundo?.destino === 'solo-json' && segundo.motivo === 'sin-campo-pdf', 'col 
 const nombre = res.rows.find((r) => r.label === 'Nombre' && r.hoja === 'encabezado')!;
 ok(nombre?.destino === 'pdf', 'fila con col C -> va al PDF');
 const enHojaExcluida = res.rows.find((r) => r.hoja === 'polizaMadre' && r.label === 'Numero')!;
-ok(enHojaExcluida?.destino === 'excluida' && enHojaExcluida.motivo === 'hoja-no-aplica', 'fila de hoja excluida');
+ok(enHojaExcluida?.destino === 'excluida' && enHojaExcluida.motivo === 'hoja-no-aplica', 'fila NO-JSON de hoja excluida sigue excluida');
 
 // --- columnas C y L presentes ---
 ok(nombre.nombrePdf === 'Nombre del asegurado', 'col C (Nombre en PDF) mapeada');
@@ -157,6 +159,31 @@ ok(
   'no quedan filas sin clasificar',
 );
 ok(res.stats.pdf + res.stats.soloJson + res.stats.excluidas === res.stats.filasDatos, 'la partición suma el total');
+
+// --- A.1: reconciliación auditable -----------------------------------------
+ok(res.stats.filasMarcadorHoja === 2, `2 filas-marcador de HOJA (got ${res.stats.filasMarcadorHoja})`);
+ok(res.stats.filasMarcadorBloque === 2, `2 filas-marcador de BLOQUE (got ${res.stats.filasMarcadorBloque})`);
+ok(res.stats.filasMarcador === 4, `4 anotaciones en total (got ${res.stats.filasMarcador})`);
+ok(
+  res.stats.filasConContenido === res.stats.filasMarcador + res.stats.pdf + res.stats.soloJson + res.stats.excluidas,
+  'reconciliación: filasConContenido === marcador + pdf + soloJSON + excluidas',
+);
+ok(
+  res.stats.filasConContenido === res.stats.filasMarcador + res.stats.filasDatos,
+  'filasConContenido === filasMarcador + filasDatos',
+);
+// breakdown por hoja suma el total
+const sumaHojas = res.sheets.reduce((n, s2) => n + s2.pdf + s2.soloJson + s2.excluidas, 0);
+ok(sumaHojas === res.stats.filasDatos, 'el breakdown por hoja suma las filas de datos');
+
+// --- precedencia JSON-first + hojaAplica ------------------------------------
+const contratoEnHojaMuerta = res.rows.find((r) => r.hoja === 'polizaMadre' && r.label === 'Cod poliza')!;
+ok(contratoEnHojaMuerta?.destino === 'solo-json' && contratoEnHojaMuerta.motivo === 'contrato-json',
+  'JSON-first: contrato gana sobre la exclusión de hoja');
+ok(contratoEnHojaMuerta?.hojaAplica === false,
+  'pero queda marcado hojaAplica=false (no se pierde el matiz)');
+const contratoNormal = res.rows.find((r) => r.hoja === 'encabezado' && r.label === 'Tipo Tramite')!;
+ok(contratoNormal?.hojaAplica === true, 'un contrato en hoja que sí aplica lleva hojaAplica=true');
 
 // --- marcadores: normalización y alcance ---
 const m = findMarcadores([['', 'sección   no   aplica para este formulario']]);
@@ -211,7 +238,27 @@ if (fs.existsSync(FIXTURE)) {
   console.log('\n--- CSC real ---');
   console.log('stats:', JSON.stringify(r.stats));
   console.log('hojas:', r.sheets.map((s) => `${s.name}${s.esNodo ? '' : '*'}${s.aplica ? '' : ' (NO APLICA)'}`).join(' | '));
-  ok(r.stats.filasDatos === 177, `CSC: 177 filas de datos (got ${r.stats.filasDatos})`);
+  // A.1 cerrado: 177 filas CON CONTENIDO = 4 marcador + 173 datos (64+33+76)
+  ok(r.stats.filasConContenido === 177, `CSC: 177 filas con contenido (got ${r.stats.filasConContenido})`);
+  ok(r.stats.filasMarcadorHoja === 4, `CSC: 4 filas-marcador de hoja (got ${r.stats.filasMarcadorHoja})`);
+  ok(r.stats.filasDatos === 173, `CSC: 173 filas de datos (got ${r.stats.filasDatos})`);
+  ok(r.stats.pdf === 64, `CSC: 64 van al PDF (got ${r.stats.pdf})`);
+  ok(r.stats.soloJson === 33, `CSC: 33 solo-JSON (got ${r.stats.soloJson})`);
+  ok(r.stats.excluidas === 76, `CSC: 76 excluidas (got ${r.stats.excluidas})`);
+  ok(
+    r.stats.filasConContenido === r.stats.filasMarcador + r.stats.pdf + r.stats.soloJson + r.stats.excluidas,
+    'CSC: 177 === 4 + 64 + 33 + 76',
+  );
+  // breakdown por hoja (col "datos" de la tabla del cliente incluye la fila-marcador)
+  const esperado: Record<string, number> = {
+    encabezado: 19, datosFormulario: 1, datosGenerales: 5, intermediario: 5, polizaMadre: 11,
+    datosAdicionales: 1, personas: 117, riesgo: 2, direccion: 10, mediosNotificacion: 6,
+  };
+  for (const [hoja, n] of Object.entries(esperado)) {
+    const si = r.sheets.find((x) => x.name === hoja);
+    const got = si ? si.filasDatos + si.filasMarcador : -1;
+    ok(got === n, `CSC ${hoja}: ${n} filas con contenido (got ${got})`);
+  }
   ok(r.stats.hojasNodo === 10, `CSC: 10 hojas de nodo (got ${r.stats.hojasNodo})`);
   ok(r.stats.hojasNoAplica === 4, `CSC: 4 hojas no-aplica (got ${r.stats.hojasNoAplica})`);
   ok(r.stats.bloquesExcluidos === 2, `CSC: 2 bloques excluidos (got ${r.stats.bloquesExcluidos})`);
