@@ -473,6 +473,11 @@ export default function Etapa0Screen() {
                 <Stat n={ficha.stats.pdf} l="van al PDF" tone="text-emerald-700" />
                 <Stat n={ficha.stats.soloJson} l="solo JSON" />
                 <Stat n={ficha.stats.excluidas} l="excluidas" tone="text-red-600" />
+                <Stat
+                  n={ficha.stats.filasNota}
+                  l="filas-nota"
+                  tone={ficha.stats.filasNota ? 'text-amber-600' : 'text-slate-700'}
+                />
                 <Stat n={ficha.stats.filasMarcadorHoja} l="marcador hoja" />
                 <Stat
                   n={Object.keys(colisiones).length}
@@ -625,6 +630,13 @@ export default function Etapa0Screen() {
                   <Button
                     onClick={doDescargarPdf}
                     disabled={colisionesPdf.size > 0 || trabajando !== null}
+                    title={
+                      colisionesPdf.size > 0
+                        ? `Bloqueado por ${colisionesPdf.size} colisión(es) de nombre: ` +
+                          [...colisionesPdf].slice(0, 5).join(' · ') +
+                          (colisionesPdf.size > 5 ? ' …' : '')
+                        : 'Escribe el PDF con los nombres nuevos'
+                    }
                     data-dl="pdf"
                   >
                     <Download size={14} /> {trabajando === 'pdf' ? 'Escribiendo…' : 'PDF renombrado'}
@@ -762,7 +774,10 @@ export default function Etapa0Screen() {
                                 {asig.leafIdx.length > 1 ? ` 1:${asig.leafIdx.length}` : ''}
                               </span>
                             ) : (
-                              <span className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`} title={r.motivo}>
+                              <span
+                                className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`}
+                                title={[r.motivo, ...(r.notaSeñales ?? [])].filter(Boolean).join(' · ')}
+                              >
                                 {r.motivo ?? r.destino}
                               </span>
                             )}

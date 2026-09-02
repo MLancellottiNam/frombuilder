@@ -99,14 +99,21 @@ ok(Math.abs(prov.rect.w - 200) <= 1.5 && Math.abs(prov.rect.h - 20) <= 1.5, 'anc
     console.log('\n--- CSC real ---');
     console.log(`leaves=${real.leaves.length} widgets=${real.totalWidgets} páginas=${real.pageCount}`);
     console.log('duplicados:', JSON.stringify(real.duplicados));
-    ok(real.leaves.length === 115, `CSC: 115 leaves (got ${real.leaves.length})`);
+    // 111 CAMPOS con 115 WIDGETS: la distinción para la que existe este lector.
+    // Un nodo con kids sin /T es UN campo pintado en varios lugares, no varios.
+    ok(real.leaves.length === 111, `CSC: 111 campos (got ${real.leaves.length})`);
+    ok(real.totalWidgets === 115, `CSC: 115 widgets (got ${real.totalWidgets})`);
     ok(real.pageCount === 2, `CSC: 2 páginas (got ${real.pageCount})`);
     ok(real.leaves.filter((l) => l.ft === '/Sig').length === 0, 'CSC: 0 campos /Sig');
+    // El orden NATIVO del diccionario está desordenado; el de lectura no.
     const n = real.leaves.map((l) => l.name);
-    const ip = n.indexOf('provincia_asegurado');
-    const ic = n.indexOf('canton_asegurado');
-    const id = n.indexOf('distrito_asegurado');
-    ok(ip >= 0 && ic === ip + 1 && id === ic + 1, `CSC: provincia→cantón→distrito consecutivos (${ip},${ic},${id})`);
+    const trio = ['provincia', 'canton', 'distrito'];
+    const idx = trio.map((t) => n.findIndex((x) => x.toLowerCase().startsWith(t)));
+    console.log('provincia/canton/distrito en orden de lectura:', JSON.stringify(idx), '->', idx.map((i) => n[i]));
+    ok(
+      idx.every((i) => i >= 0) && idx[1] === idx[0] + 1 && idx[2] === idx[1] + 1,
+      `CSC: provincia→cantón→distrito consecutivos en orden de lectura (${idx.join(',')})`,
+    );
   } else {
     console.log(`\n(SKIP) fixture real no encontrado: ${FIXTURE}`);
   }

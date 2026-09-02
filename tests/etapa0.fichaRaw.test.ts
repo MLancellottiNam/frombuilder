@@ -4,7 +4,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { buildFichaRaw, findMarcadores, type RawSheet } from '../src/lib/etapa0/fichaRaw';
+import { buildFichaRaw, findMarcadores, norm, puntuarFilaNota, UMBRAL_NOTA, type RawSheet } from '../src/lib/etapa0/fichaRaw';
 
 let fail = 0;
 const ok = (c: boolean, m: string) => {
@@ -224,6 +224,26 @@ ok(findMarcadores(hojaEnC, { regla: 6 })[0]?.alcance === 'hoja', 'marcador de HO
 // --------------------------------------------------------------------------
 // Fixture REAL (opcional, gitignoreado).
 // --------------------------------------------------------------------------
+// --- Fix A: puntaje de fila-nota (unidad, sin fixture) ---
+// La señal decisiva es estructural (sin D, sin E, sin M). El largo del texto es
+// una señal débil a propósito: si decidiera sola, se comería las preguntas PEP.
+{
+  const nota = { nombrePdf: 'Esta sección es obligatoria e invariable en cada Producto / Formulario / JSON', label: '', tipo: '', campoJson: '' };
+  const notaCorta = { nombrePdf: 'Dentro de datosFormulario', label: '', tipo: '', campoJson: '' };
+  const campoLargo = {
+    nombrePdf: '¿Desempeña o ha desempeñado algún cargo político destacado (PEP1), en territorio nacional o en el extranjero?',
+    label: 'PEP', tipo: 'Casilla de verificación', campoJson: 'datosFormulario.personas.pep1',
+  };
+  const campoSinM = { nombrePdf: 'Lugar', label: 'Lugar', tipo: 'Texto', campoJson: '' };
+
+  ok(puntuarFilaNota(nota).score >= UMBRAL_NOTA, `nota larga supera el umbral (${puntuarFilaNota(nota).score} >= ${UMBRAL_NOTA})`);
+  ok(puntuarFilaNota(notaCorta).score >= UMBRAL_NOTA, `nota de 3 palabras también (${puntuarFilaNota(notaCorta).score})`);
+  ok(puntuarFilaNota(campoLargo).score < UMBRAL_NOTA, `campo de 16 palabras NO es nota (${puntuarFilaNota(campoLargo).score})`);
+  ok(puntuarFilaNota(campoSinM).score < UMBRAL_NOTA, `campo real sin col M NO es nota (${puntuarFilaNota(campoSinM).score})`);
+  ok(puntuarFilaNota({ nombrePdf: '', label: '', tipo: '', campoJson: '' }).score === 0, 'sin col C no es candidata a nota');
+  ok(puntuarFilaNota(nota).señales.length >= 4, 'la nota expone sus señales para mostrarlas en la UI');
+}
+
 const FIXTURE = path.resolve('fixtures/Ficha_de_configuración_-_Conozca_a_su_cliente.xlsx');
 if (fs.existsSync(FIXTURE)) {
   const XLSX = require('xlsx');
@@ -238,17 +258,43 @@ if (fs.existsSync(FIXTURE)) {
   console.log('\n--- CSC real ---');
   console.log('stats:', JSON.stringify(r.stats));
   console.log('hojas:', r.sheets.map((s) => `${s.name}${s.esNodo ? '' : '*'}${s.aplica ? '' : ' (NO APLICA)'}`).join(' | '));
-  // A.1 cerrado: 177 filas CON CONTENIDO = 4 marcador + 173 datos (64+33+76)
+  // A.1 cerrado: 177 filas CON CONTENIDO = 4 marcador + 173 datos.
+  // El reparto de las 173 depende de dos decisiones ya tomadas:
+  //  - precedencia JSON-first: una fila con A === 'JSON' en hoja NO APLICA cuenta
+  //    como solo-JSON (con hojaAplica=false), no como excluida.
+  //  - v1.4.1 Fix A: las 3 filas-nota salen del bucket `pdf` (64 -> 61) y pasan a
+  //    excluidas con motivo 'fila-nota'.
   ok(r.stats.filasConContenido === 177, `CSC: 177 filas con contenido (got ${r.stats.filasConContenido})`);
   ok(r.stats.filasMarcadorHoja === 4, `CSC: 4 filas-marcador de hoja (got ${r.stats.filasMarcadorHoja})`);
   ok(r.stats.filasDatos === 173, `CSC: 173 filas de datos (got ${r.stats.filasDatos})`);
-  ok(r.stats.pdf === 64, `CSC: 64 van al PDF (got ${r.stats.pdf})`);
-  ok(r.stats.soloJson === 33, `CSC: 33 solo-JSON (got ${r.stats.soloJson})`);
-  ok(r.stats.excluidas === 76, `CSC: 76 excluidas (got ${r.stats.excluidas})`);
+  ok(r.stats.pdf === 61, `CSC: 61 van al PDF tras Fix A (got ${r.stats.pdf})`);
+  ok(r.stats.soloJson === 46, `CSC: 46 solo-JSON = 33 contrato + 13 sin-campo-pdf (got ${r.stats.soloJson})`);
+  ok(r.stats.excluidas === 66, `CSC: 66 excluidas = 15 hoja + 48 bloque + 3 nota (got ${r.stats.excluidas})`);
   ok(
     r.stats.filasConContenido === r.stats.filasMarcador + r.stats.pdf + r.stats.soloJson + r.stats.excluidas,
-    'CSC: 177 === 4 + 64 + 33 + 76',
+    'CSC: 177 === 4 + 61 + 46 + 66',
   );
+
+  // --- Fix A: filas-nota fuera del bucket pdf ---
+  ok(r.stats.filasNota === 3, `CSC: 3 filas-nota detectadas (got ${r.stats.filasNota})`);
+  const notas = r.rows.filter((x) => x.motivo === 'fila-nota').map((x) => `${x.hoja}-${x.fila}`);
+  ok(
+    JSON.stringify(notas.sort()) === JSON.stringify(['datosFormulario-15', 'datosGenerales-15', 'encabezado-22']),
+    'CSC: las filas-nota son exactamente encabezado-22, datosFormulario-15 y datosGenerales-15: ' + notas.join(', '),
+  );
+  ok(
+    r.rows.filter((x) => x.motivo === 'fila-nota').every((x) => (x.notaSeñales ?? []).length >= 3),
+    'CSC: cada fila-nota expone al menos 3 señales del puntaje',
+  );
+  // Lo que NO se debe tocar: las preguntas PEP son largas pero son campos reales.
+  const pep = r.rows.filter((x) => /cargo politico destacado/.test(norm(x.nombrePdf)));
+  ok(pep.length >= 6, `CSC: hay ${pep.length} filas PEP de texto largo`);
+  ok(
+    pep.every((x) => x.destino === 'pdf'),
+    'CSC: ninguna pregunta PEP (16-23 palabras) cae como fila-nota',
+  );
+  const largas = r.rows.filter((x) => x.destino === 'pdf' && x.nombrePdf.trim().split(/\s+/).length > 8);
+  ok(largas.length >= 8, `CSC: ${largas.length} campos PDF legítimos con col C de más de 8 palabras sobreviven`);
   // breakdown por hoja (col "datos" de la tabla del cliente incluye la fila-marcador)
   const esperado: Record<string, number> = {
     encabezado: 19, datosFormulario: 1, datosGenerales: 5, intermediario: 5, polizaMadre: 11,

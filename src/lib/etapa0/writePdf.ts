@@ -26,6 +26,7 @@
 // ---------------------------------------------------------------------------
 
 import type { PDFDict as TPDFDict, PDFRef as TPDFRef } from 'pdf-lib';
+import { readPdfFields } from './pdfFields';
 
 /** Nombre actual (full name leído) -> nombre final que hay que escribir. */
 export type MapaRenombres = Map<string, string>;
@@ -230,6 +231,32 @@ export async function escribirPdfRenombrado(
   // `updateFieldAppearances: false` es obligatorio: la API de alto nivel que
   // usa pdf-lib para regenerarlas se rompe con estos campos.
   const bytes = await doc.save({ updateFieldAppearances: false });
+
+  // Assert de post-escritura: se relee lo que se acaba de generar y se exige
+  // que la cantidad de nombres ÚNICOS coincida con la de campos. Un PDF con
+  // nombres duplicados es inservible para Signframe, así que es ERROR, no
+  // warning. El bloqueo de la UI es defensa en profundidad, no la única línea:
+  // acá se cubre cualquier camino (ediciones a mano, otro llamador, un bug
+  // futuro en la siembra).
+  const releido = await readPdfFields(bytes);
+  const unicos = new Set(releido.leaves.map((l) => l.name));
+  const dup = Object.entries(releido.duplicados);
+  if (unicos.size !== releido.leaves.length || dup.length > 0) {
+    throw new Error(
+      `El PDF renombrado quedó con nombres duplicados (${releido.leaves.length} campos, ` +
+        `${unicos.size} nombres únicos) y no sirve para Signframe. Resolvé las colisiones antes de escribir: ` +
+        dup
+          .slice(0, 10)
+          .map(([n, c]) => `"${n}" ×${c}`)
+          .join(' · ') +
+        (dup.length > 10 ? ' …' : ''),
+    );
+  }
+  if (releido.leaves.length !== terminales.length) {
+    throw new Error(
+      `El PDF renombrado perdió campos al escribirse: entraron ${terminales.length} y salieron ${releido.leaves.length}.`,
+    );
+  }
 
   return { bytes, renombrados, campos: terminales.length, limpiados, warnings };
 }

@@ -119,6 +119,29 @@ function hojaFicha(): string[][] {
   ok(daOk >= 1, `el /DA con auto-size quedó topeado a 10pt (got ${daOk})`);
   ok(acro.get(PDFName.of('NeedAppearances')) !== undefined, '/NeedAppearances quedó seteado');
 
+  // --- Fix D: el assert de post-escritura no deja pasar duplicados ---------
+  const conColision = new Map<string, string>([
+    ['Profesión', 'mismo_nombre'],
+    ['padre.hijo', 'mismo_nombre'],
+  ]);
+  let tiro = '';
+  try {
+    await escribirPdfRenombrado(original, conColision, {});
+  } catch (e) {
+    tiro = String(e);
+  }
+  ok(/duplicados/.test(tiro), 'escribir con nombres duplicados tira Error, no warning: ' + tiro.slice(0, 90));
+  ok(/mismo_nombre/.test(tiro), 'el error nombra la colisión concreta');
+
+  // Colisión contra un campo que NO se renombra (queda con su nombre original).
+  let tiro2 = '';
+  try {
+    await escribirPdfRenombrado(original, new Map([['Profesión', 'acepta']]), {});
+  } catch (e) {
+    tiro2 = String(e);
+  }
+  ok(/duplicados/.test(tiro2), 'también detecta la colisión contra un campo sin renombrar');
+
   // --- avisos de la col M -------------------------------------------------
   const ficha = buildFichaRaw([{ name: 'personas', aoa: hojaFicha() }]);
   ok(ficha.rows.length === 4, `4 filas de ficha (got ${ficha.rows.length})`);

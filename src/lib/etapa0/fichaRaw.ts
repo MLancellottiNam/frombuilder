@@ -71,7 +71,12 @@ export function normUpper(s: string): string {
 }
 
 export type RowDestino = 'pdf' | 'solo-json' | 'excluida';
-export type RowMotivo = 'hoja-no-aplica' | 'bloque-no-aplica' | 'contrato-json' | 'sin-campo-pdf';
+export type RowMotivo =
+  | 'hoja-no-aplica'
+  | 'bloque-no-aplica'
+  | 'contrato-json'
+  | 'sin-campo-pdf'
+  | 'fila-nota';
 
 export interface FichaRow {
   hoja: string;
@@ -94,6 +99,8 @@ export interface FichaRow {
   campoPdfInterno: string;
   destino: RowDestino;
   motivo?: RowMotivo;
+  /** por qué se detectó como fila-nota (solo cuando motivo === 'fila-nota') */
+  notaSeñales?: string[];
   /** false si la fila vive en una hoja marcada NO APLICA (aunque su destino sea solo-json) */
   hojaAplica: boolean;
 }
@@ -158,6 +165,8 @@ export interface FichaRawResult {
     hojasNodo: number;
     hojasNoAplica: number;
     bloquesExcluidos: number;
+    /** filas cuya col C era una nota descriptiva, no un nombre de campo */
+    filasNota: number;
     pdf: number;
     soloJson: number;
     excluidas: number;
@@ -305,6 +314,97 @@ function parseRouting(sheet: RawSheet, warnings: string[]): RoutingEntry[] {
   return out;
 }
 
+// --- filas-nota -------------------------------------------------------------
+
+/**
+ * Algunas filas traen en col C una **nota descriptiva**, no el nombre de un
+ * campo del PDF ("Esta sección es obligatoria e invariable…", "No posee campos
+ * propios…", "Dentro de datosFormulario"). Si se cuelan al bucket `pdf`
+ * consumen campos reales y **corren toda la alineación desde el principio**.
+ *
+ * La señal decisiva es ESTRUCTURAL, no léxica: una nota no tiene label (col D),
+ * ni tipo de dato (col E), ni path JSON (col M) — es prosa suelta en col C. El
+ * largo del texto es una señal MUY débil y por sí sola no alcanza: en el CSC las
+ * preguntas PEP tienen 16 a 23 palabras y son campos PDF perfectamente reales.
+ *
+ * Por eso se puntúa y se pide umbral, en vez de decidir con una sola condición.
+ */
+export interface PuntajeNota {
+  score: number;
+  señales: string[];
+}
+
+/** Verbos/arranques típicos de una anotación. Suman, nunca deciden solos. */
+const FRASES_NOTA = [
+  'no posee',
+  'dentro de',
+  'solamente',
+  'es obligatoria',
+  'es obligatorio',
+  'invariable',
+  'esta seccion',
+  'este bloque',
+  'ver ',
+  'debe ',
+];
+
+export const UMBRAL_NOTA = 5;
+
+export function puntuarFilaNota(rec: {
+  nombrePdf: string;
+  label: string;
+  tipo: string;
+  campoJson: string;
+}): PuntajeNota {
+  const señales: string[] = [];
+  let score = 0;
+  const c = rec.nombrePdf.trim();
+  if (!c) return { score: 0, señales }; // sin col C no es candidata: ya cae en sin-campo-pdf
+
+  // --- señales estructurales (las fuertes) ---
+  if (!rec.label.trim()) {
+    score += 2;
+    señales.push('sin label (col D)');
+  }
+  if (!rec.tipo.trim()) {
+    score += 2;
+    señales.push('sin tipo de dato (col E)');
+  }
+  if (!rec.campoJson.trim()) {
+    score += 2;
+    señales.push('sin path JSON (col M)');
+  }
+
+  // --- señales léxicas (las débiles) ---
+  const palabras = c.split(/\s+/).length;
+  if (palabras > 8) {
+    score += 1;
+    señales.push(`${palabras} palabras en col C`);
+  }
+  if (/\.$/.test(c)) {
+    score += 1;
+    señales.push('col C termina en punto');
+  }
+  const nc = norm(c);
+  const frase = FRASES_NOTA.find((f) => nc.includes(f));
+  if (frase) {
+    score += 2;
+    señales.push(`frase de anotación ("${frase.trim()}")`);
+  }
+
+  return { score, señales };
+}
+
+export function esFilaNota(rec: {
+  nombrePdf: string;
+  label: string;
+  tipo: string;
+  campoJson: string;
+}): PuntajeNota | null {
+  const p = puntuarFilaNota(rec);
+  return p.score >= UMBRAL_NOTA ? p : null;
+}
+
 // --- núcleo -----------------------------------------------------------------
 
 const MARCADOR_SOLO_JSON = 'no se llena en pdf';
@@ -423,6 +523,8 @@ export function buildFichaRaw(sheets: RawSheet[]): FichaRawResult {
 
       filasDatos++;
 
+      const nota = esFilaNota(rec);
+
       // 4) Clasificación. Precedencia elegida: el CONTRATO (A === 'JSON') gana
       //    sobre la exclusión de hoja, porque es más informativo: esas filas
       //    describen el JSON destino igual. Para no perder el matiz, la fila
@@ -436,6 +538,11 @@ export function buildFichaRaw(sheets: RawSheet[]): FichaRawResult {
       } else if (excluidasPorBloque.has(fila)) {
         rec.destino = 'excluida';
         rec.motivo = 'bloque-no-aplica';
+      } else if (nota) {
+        // Nota descriptiva en col C: no es un campo del PDF.
+        rec.destino = 'excluida';
+        rec.motivo = 'fila-nota';
+        rec.notaSeñales = nota.señales;
       } else if (!rec.nombrePdf || norm(rec.nombrePdf).includes(MARCADOR_SOLO_JSON)) {
         rec.destino = 'solo-json';
         rec.motivo = 'sin-campo-pdf';
@@ -478,6 +585,7 @@ export function buildFichaRaw(sheets: RawSheet[]): FichaRawResult {
     hojasNodo,
     hojasNoAplica,
     bloquesExcluidos: bloquesExcluidos.length,
+    filasNota: rows.filter((r) => r.motivo === 'fila-nota').length,
     pdf: rows.filter((r) => r.destino === 'pdf').length,
     soloJson: rows.filter((r) => r.destino === 'solo-json').length,
     excluidas: rows.filter((r) => r.destino === 'excluida').length,
