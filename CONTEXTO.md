@@ -195,6 +195,36 @@ Cada ítem que falla es **clickeable** y selecciona el campo.
 - **Proyecto** (.json) para guardar/cargar todo el estado, e **Importar JSON** de un
   form-definition existente (preserva `_sourcePdf`, ids y `sourceMeta`).
 
+### 5.8 Etapa 0 — Renombrado asistido (v1.0.0 → v1.5.0)
+
+La ficha cruda del INS viene con la **col N vacía** y los AcroNames del PDF **mienten**
+(en el CSC `Profesión` es en realidad el Detalle del domicilio extranjero). Etapa 0 toma
+la **ficha cruda + el PDF crudo** y devuelve el **PDF renombrado** y la **ficha con la col N
+completada**, para que el bind de Etapa 2 sea 1:1 exacto.
+
+Módulos (`src/lib/etapa0/`):
+
+| archivo | qué hace |
+|---|---|
+| `fichaRaw.ts` | aplana las 13 hojas, detecta el header de 14 columnas y las **4 exclusiones**. Un marcador `NO APLICA` real cumple **3 condiciones** (`NO APLICA` + (`HOJA`\|`SECCION`) + `FORMULARIO`); nunca se escanean J ni N (usan “No aplica” como enum) y el marcador de bloque solo vale en col G. Precedencia: **contrato JSON primero** (`A === 'JSON'`), después hoja, bloque, sin-campo-pdf. Cada fila lleva `motivo` y `hojaAplica`. |
+| `pdfFields.ts` | walk **crudo** del AcroForm (no la API de alto nivel de pdf-lib). Orden de lectura `(page, -Y, X)`. Un nodo con kids sin `/T` es **un** campo con N widgets. Marca `multiWidgetSospechoso` (`/Tx` con >1 widget = colisión del PDF original). |
+| `acroName.ts` | instancias del bloque repetible (ASG/PJR/RPL, expansión **instancia-mayor**), grupos de opciones por col D consecutiva, y el nombre propuesto `prefijo + slug(C) + [slug(F)]`. Las colisiones **se marcan, no se desambiguan con contador ciego**. |
+| `align.ts` | Needleman-Wunsch con huecos tolerados. La señal confiable es la **posición**; el texto del AcroName solo **suma** (`BOOST_TEXTO`), nunca resta. El 1:N (fecha partida en día/mes/año) se modela **dentro del DP**, no en un post-paso. |
+| `writePdf.ts` | escribe el PDF renombrado sobre el dict crudo: aplana `/AcroForm/Fields` (Signframe necesita nombres planos), baja los heredables (`FT`, `Ff`, `DA`, `Q`, `MaxLen`, `Opt`) antes de desenganchar el `/Parent`, limpia `/V` `/DV` `/TU` `/TM` `/RV`, pone `/AS /Off` en los `/Btn`, topea el tamaño de fuente del `/DA` (default 10pt) y setea `/NeedAppearances`. **Los renombrados circulares no necesitan nombre intermedio**: el renombre se aplica sobre la identidad del objeto, no sobre una tabla por nombre. |
+| `writeFicha.ts` | reescribe el mismo `.xlsx` completando **solo la col N** de las filas que van al PDF (solo-JSON y excluidas quedan vacías). Además `detectarAvisosColM`: erratas de tipeo **genéricas** (grafía inconsistente, no-ASCII, mayúscula inicial, espacios, punto doble) — **se reportan, no se corrigen**. |
+| `reporte.ts` | CSV con asignados, huérfanos de los dos lados, colisiones, avisos de col M y la nota de ausencia de `/Sig`. |
+
+UI (`src/components/etapa0/`): `Etapa0Screen` (dos paneles + stats + panel de hand-off),
+`TablaCampos` (tabla editable centrada en el campo del PDF, con bulk edit y colisiones en
+rojo) y `PdfPreview` (render con `pdfjs-dist` + overlay clickeable, azul=alta,
+ámbar=media/revisar, rojo=colisión, gris=sin asignar).
+
+El hand-off es un checklist de 4 pasos y **“Continuar a Etapa 1” queda deshabilitado hasta
+descargar el PDF renombrado**: si el PDF entra a Signframe antes del renombrado, el
+`sourceMeta` queda clavado a los nombres genéricos. El estado de Etapa 0 (instancias,
+ediciones, tope de fuente, descargas hechas) se guarda dentro del **proyecto .json**; los
+archivos no viajan.
+
 ---
 
 ## 6. Estado verificado (evidencia)
@@ -250,6 +280,10 @@ app puede **re-importar** el resultado para revisión visual final.
 
 ## 9. Próximos pasos abiertos
 
+0. **Fixtures reales de Etapa 0**: falta adjuntar
+   `Ficha_de_configuración_-_Conozca_a_su_cliente.xlsx` y
+   `BUC_Formulario_Conozca_Cliente_Homologado.pdf` en `fixtures/` (gitignoreada) para
+   levantar los 3 bloques de asserts que hoy quedan en `(SKIP)`.
 1. **`SKILL.md` / `CLAUDE.md`** para la última milla híbrida (tomar el esqueleto
    validado + la ficha y generar `autoFillConcat`, repeaters, enfermedades,
    `excludeFromJson`).

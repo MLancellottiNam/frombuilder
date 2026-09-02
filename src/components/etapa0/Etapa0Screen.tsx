@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Upload, FileSignature, FileText, Search } from 'lucide-react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
+  Circle,
+  Download,
+  FileSignature,
+  FileSpreadsheet,
+  FileText,
+  Search,
+  Upload,
+} from 'lucide-react';
 import { useStore } from '../../store/store';
 import { Button } from '../ui';
 import { readFichaRaw, type FichaRawResult, type RowDestino } from '../../lib/etapa0/fichaRaw';
@@ -12,9 +23,47 @@ import {
   contarColisiones,
   type Instancia,
 } from '../../lib/etapa0/acroName';
-import { alinear, type Confianza } from '../../lib/etapa0/align';
+import { alinear, type Asignacion, type Confianza } from '../../lib/etapa0/align';
+import { escribirPdfRenombrado } from '../../lib/etapa0/writePdf';
+import { escribirFichaConColN, detectarAvisosColM, etiquetaAviso, type ValoresColN } from '../../lib/etapa0/writeFicha';
+import { construirReporte } from '../../lib/etapa0/reporte';
+import { downloadCsv } from '../../lib/matrixOut';
+import { slugify } from '../../lib/exporter';
 import TablaCampos, { nombreEfectivo, type Ediciones } from './TablaCampos';
 import PdfPreview from './PdfPreview';
+
+/** Clave estable de una fila de ficha (sobrevive a reordenamientos). */
+function claveFila(hoja: string, fila: number, codigo?: string | null): string {
+  return `${hoja}|${fila}|${codigo ?? ''}`;
+}
+
+function descargarBytes(bytes: Uint8Array, filename: string, mime: string): void {
+  const blob = new Blob([bytes.slice()], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function Paso({ ok, n, children }: { ok: boolean; n: number; children: React.ReactNode }) {
+  return (
+    <li className="flex items-start gap-1.5">
+      {ok ? (
+        <CheckCircle2 size={13} className="text-emerald-600 mt-[1px] shrink-0" />
+      ) : (
+        <Circle size={13} className="text-slate-300 mt-[1px] shrink-0" />
+      )}
+      <span className={ok ? 'text-slate-500 line-through decoration-slate-300' : 'text-slate-700'}>
+        <b className="text-slate-400 mr-1">{n}.</b>
+        {children}
+      </span>
+    </li>
+  );
+}
 
 const CONF_STYLE: Record<string, string> = {
   alta: 'bg-blue-50 text-blue-700',
@@ -43,6 +92,7 @@ export default function Etapa0Screen() {
   const pdfInput = useRef<HTMLInputElement>(null);
 
   const [ficha, setFicha] = useState<FichaRawResult | null>(null);
+  const [fichaFile, setFichaFile] = useState<File | null>(null);
   const [pdf, setPdf] = useState<PdfFieldsResult | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,11 +103,18 @@ export default function Etapa0Screen() {
   const [q, setQ] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
   const [ediciones, setEdiciones] = useState<Ediciones>({});
+  const [limitarFuente, setLimitarFuente] = useState(true);
+  const [tamanoFuente, setTamanoFuente] = useState(10);
+  const [descargas, setDescargas] = useState({ pdf: false, ficha: false, reporte: false });
+  const [trabajando, setTrabajando] = useState<string | null>(null);
+  const [avisoEscritura, setAvisoEscritura] = useState<string | null>(null);
 
   const onFicha = async () => {
     const f = fichaInput.current?.files?.[0];
     if (!f) return;
     setError(null);
+    setFichaFile(f);
+    setDescargas((d) => ({ ...d, ficha: false, reporte: false }));
     try {
       const r = await readFichaRaw(f);
       setFicha(r);
@@ -80,6 +137,7 @@ export default function Etapa0Screen() {
     if (!f) return;
     setError(null);
     setPdfFile(f);
+    setDescargas({ pdf: false, ficha: false, reporte: false });
     try {
       setPdf(await readPdfFields(await f.arrayBuffer()));
       setTab('pdf');
@@ -174,6 +232,194 @@ export default function Etapa0Screen() {
     return m;
   }, [align]);
 
+  /** leafIdx -> asignación de la pre-alineación (para el reporte). */
+  const asigPorLeaf = useMemo(() => {
+    const m = new Map<number, Asignacion>();
+    align?.asignaciones.forEach((a) => a.leafIdx.forEach((li) => m.set(li, a)));
+    return m;
+  }, [align]);
+
+  /** Erratas de tipeo de la col M. Se reportan, NO se corrigen. */
+  const avisosColM = useMemo(() => (ficha ? detectarAvisosColM(ficha.rows) : []), [ficha]);
+
+  // --- v1.5.0: escritura --------------------------------------------------
+
+  const baseNombre = useMemo(
+    () => slugify((pdfFile?.name ?? ficha?.sheets[0]?.name ?? 'formulario').replace(/\.pdf$/i, '')),
+    [pdfFile, ficha],
+  );
+
+  /** leafIdx -> fila de ficha asignada (según la edición vigente). */
+  const filaDeLeaf = (i: number) => {
+    const idx = ediciones[i]?.filaIdx;
+    return idx == null ? null : (filasPdf[idx] ?? null);
+  };
+
+  const doDescargarPdf = async () => {
+    if (!pdfFile || !pdf) return;
+    if (colisionesPdf.size > 0) {
+      setError('Hay colisiones de nombre: resolvelas antes de escribir el PDF.');
+      return;
+    }
+    setTrabajando('pdf');
+    setError(null);
+    try {
+      const renombres = new Map<string, string>();
+      pdf.leaves.forEach((l, i) => {
+        const final = nombreEfectivo(l, ediciones[i]);
+        if (final !== l.name) renombres.set(l.name, final);
+      });
+      const r = await escribirPdfRenombrado(await pdfFile.arrayBuffer(), renombres, {
+        limitarFuente,
+        tamanoFuente,
+      });
+      descargarBytes(r.bytes, `${baseNombre}-renombrado.pdf`, 'application/pdf');
+      setDescargas((d) => ({ ...d, pdf: true }));
+      setAvisoEscritura(
+        `PDF escrito: ${r.renombrados} de ${r.campos} campos renombrados, ${r.limpiados} con valor borrado.` +
+          (r.warnings.length ? ' · ' + r.warnings.join(' · ') : ''),
+      );
+    } catch (e) {
+      setError('No se pudo escribir el PDF: ' + String(e));
+    } finally {
+      setTrabajando(null);
+    }
+  };
+
+  const doDescargarFicha = async () => {
+    if (!fichaFile || !ficha || !pdf) return;
+    setTrabajando('ficha');
+    setError(null);
+    try {
+      // Una fila de ficha puede corresponder a varios campos del PDF (1:N, y
+      // también las instancias, que comparten la fila de origen). Se listan
+      // todos separados por coma: la col N tiene que decir la verdad completa.
+      const porFila = new Map<string, { hoja: string; fila: number; nombres: string[] }>();
+      pdf.leaves.forEach((l, i) => {
+        const np = filaDeLeaf(i);
+        if (!np) return;
+        const k = claveFila(np.fila.hoja, np.fila.fila);
+        if (!porFila.has(k)) porFila.set(k, { hoja: np.fila.hoja, fila: np.fila.fila, nombres: [] });
+        porFila.get(k)!.nombres.push(nombreEfectivo(l, ediciones[i]));
+      });
+      const valores: ValoresColN = new Map();
+      for (const { hoja, fila, nombres } of porFila.values()) {
+        if (!valores.has(hoja)) valores.set(hoja, new Map());
+        valores.get(hoja)!.set(fila, nombres.join(', '));
+      }
+      const colPorHoja = new Map(ficha.sheets.map((s) => [s.name, s.colCampoPdfInterno]));
+      const r = await escribirFichaConColN(await fichaFile.arrayBuffer(), valores, { colPorHoja });
+      descargarBytes(
+        r.bytes,
+        `${baseNombre}-ficha-col-n.xlsx`,
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      setDescargas((d) => ({ ...d, ficha: true }));
+      setAvisoEscritura(
+        `Ficha escrita: ${r.celdasEscritas} celdas de col N en ${r.hojasTocadas} hoja(s).` +
+          (r.warnings.length ? ' · ' + r.warnings.join(' · ') : ''),
+      );
+    } catch (e) {
+      setError('No se pudo escribir la ficha: ' + String(e));
+    } finally {
+      setTrabajando(null);
+    }
+  };
+
+  const doDescargarReporte = () => {
+    if (!pdf) return;
+    const rep = construirReporte({
+      leaves: pdf.leaves,
+      nombreFinal: (i) => nombreEfectivo(pdf.leaves[i], ediciones[i]),
+      filaDeLeaf,
+      confianzaDeLeaf: (i) => asigPorLeaf.get(i)?.confianza,
+      motivosDeLeaf: (i) => asigPorLeaf.get(i)?.motivos ?? [],
+      huerfanosFicha: (align?.huerfanosFicha ?? []).map((idx) => filasPdf[idx]).filter(Boolean),
+      colisiones: colisionesPdf,
+      avisosColM,
+    });
+    downloadCsv(rep.csv, `${baseNombre}-reporte-etapa0.csv`);
+    setDescargas((d) => ({ ...d, reporte: true }));
+    setAvisoEscritura(
+      `Reporte: ${rep.resumen.asignados} asignados · ${rep.resumen.huerfanosPdf} huérfanos PDF · ` +
+        `${rep.resumen.huerfanosFicha} huérfanos ficha · ${rep.resumen.colisiones} colisiones · ${rep.resumen.avisos} avisos col M.`,
+    );
+  };
+
+  // --- persistencia dentro del proyecto ------------------------------------
+
+  const etapa0Guardado = useStore((s) => s.project.etapa0);
+  const setEtapa0 = useStore((s) => s.setEtapa0);
+  const hidratado = useRef({ ficha: false, pdf: false });
+
+  // Hidratar instancias cuando entra la ficha.
+  useEffect(() => {
+    if (!ficha || hidratado.current.ficha) return;
+    hidratado.current.ficha = true;
+    const g = etapa0Guardado;
+    if (!g) return;
+    if (g.hojaInstanciable) setHojaInstanciable(g.hojaInstanciable);
+    if (g.instancias.length) setInstancias(g.instancias);
+    setLimitarFuente(g.limitarFuente);
+    setTamanoFuente(g.tamanoFuente);
+  }, [ficha, etapa0Guardado]);
+
+  // Hidratar ediciones cuando entra el PDF (se re-atan por nombre y por clave
+  // de fila; los índices no sobreviven a un cambio de instancias).
+  useEffect(() => {
+    if (!pdf || hidratado.current.pdf) return;
+    hidratado.current.pdf = true;
+    const g = etapa0Guardado;
+    if (!g || !Object.keys(g.ediciones).length) return;
+    const porClave = new Map(filasPdf.map((n, i) => [claveFila(n.fila.hoja, n.fila.fila, n.fila.instancia?.codigo), i]));
+    setEdiciones((prev) => {
+      const next: Ediciones = { ...prev };
+      pdf.leaves.forEach((l, i) => {
+        const e = g.ediciones[l.name];
+        if (!e) return;
+        next[i] = {
+          nombreNuevo: e.nombreNuevo,
+          filaIdx: e.filaClave != null ? (porClave.get(e.filaClave) ?? null) : null,
+          tipo: e.tipo,
+          manual: e.manual,
+        };
+      });
+      return next;
+    });
+  }, [pdf, etapa0Guardado, filasPdf]);
+
+  // Guardar (solo decisiones; los archivos no viajan en el proyecto).
+  useEffect(() => {
+    if (!ficha && !pdf) return;
+    const eds: Record<string, import('../../types').Etapa0Edicion> = {};
+    (pdf?.leaves ?? []).forEach((l, i) => {
+      const e = ediciones[i];
+      if (!e) return;
+      const np = e.filaIdx == null ? null : filasPdf[e.filaIdx];
+      eds[l.name] = {
+        nombreNuevo: e.nombreNuevo,
+        filaClave: np ? claveFila(np.fila.hoja, np.fila.fila, np.fila.instancia?.codigo) : null,
+        tipo: e.tipo,
+        manual: e.manual,
+      };
+    });
+    setEtapa0({
+      fichaNombre: fichaFile?.name,
+      pdfNombre: pdfFile?.name,
+      hojaInstanciable,
+      instancias,
+      ediciones: eds,
+      limitarFuente,
+      tamanoFuente,
+      pdfDescargado: descargas.pdf,
+      fichaDescargada: descargas.ficha,
+      reporteDescargado: descargas.reporte,
+    });
+  }, [
+    ficha, pdf, fichaFile, pdfFile, hojaInstanciable, instancias, ediciones, filasPdf,
+    limitarFuente, tamanoFuente, descargas, setEtapa0,
+  ]);
+
   const filasFicha = useMemo(() => {
     const base =
       filtro === 'todas'
@@ -200,7 +446,7 @@ export default function Etapa0Screen() {
         <span className="font-bold text-slate-800 flex items-center gap-1.5">
           <FileSignature size={16} /> Etapa 0 · Renombrado asistido
         </span>
-        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.4.0 · corrección manual</span>
+        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.5.0 · escritura y hand-off</span>
         <div className="flex-1" />
         <input ref={fichaInput} type="file" accept=".xlsx,.xls" hidden onChange={onFicha} />
         <input ref={pdfInput} type="file" accept="application/pdf,.pdf" hidden onChange={onPdf} />
@@ -350,6 +596,85 @@ export default function Etapa0Screen() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hand-off: escribir y pasar a Etapa 1 */}
+      {ficha && pdf && (
+        <div className="px-3 pb-2 shrink-0">
+          <div className="rounded-md border border-slate-200 bg-white px-3 py-2" data-handoff>
+            <div className="flex flex-wrap items-start gap-4">
+              <ol className="text-[11px] space-y-0.5 min-w-[280px]">
+                <Paso ok={!!ficha && !!pdf} n={1}>
+                  Cargar la ficha cruda y el PDF crudo
+                </Paso>
+                <Paso ok={colisionesPdf.size === 0} n={2}>
+                  Resolver colisiones y revisar los <b>media</b> / <b>revisar</b>
+                </Paso>
+                <Paso ok={descargas.pdf} n={3}>
+                  Descargar el <b>PDF renombrado</b> — y recién ahí subirlo a Signframe
+                </Paso>
+                <Paso ok={descargas.ficha && descargas.reporte} n={4}>
+                  Descargar la <b>ficha con la col N</b> y el <b>reporte</b>
+                </Paso>
+              </ol>
+
+              <div className="flex flex-col gap-1.5">
+                <div className="flex flex-wrap gap-1.5">
+                  <Button
+                    onClick={doDescargarPdf}
+                    disabled={colisionesPdf.size > 0 || trabajando !== null}
+                    data-dl="pdf"
+                  >
+                    <Download size={14} /> {trabajando === 'pdf' ? 'Escribiendo…' : 'PDF renombrado'}
+                  </Button>
+                  <Button onClick={doDescargarFicha} disabled={!fichaFile || trabajando !== null} data-dl="ficha">
+                    <FileSpreadsheet size={14} /> {trabajando === 'ficha' ? 'Escribiendo…' : 'Ficha con col N'}
+                  </Button>
+                  <Button onClick={doDescargarReporte} disabled={trabajando !== null} data-dl="reporte">
+                    <FileText size={14} /> Reporte CSV
+                  </Button>
+                </div>
+                <label className="flex items-center gap-1.5 text-[11px] text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={limitarFuente}
+                    onChange={(e) => setLimitarFuente(e.target.checked)}
+                  />
+                  Topear el tamaño de fuente en
+                  <input
+                    type="number"
+                    min={4}
+                    max={24}
+                    value={tamanoFuente}
+                    onChange={(e) => setTamanoFuente(Number(e.target.value) || 10)}
+                    disabled={!limitarFuente}
+                    className="w-12 rounded border border-slate-300 px-1 py-0.5 disabled:opacity-40"
+                  />
+                  pt
+                </label>
+              </div>
+
+              <div className="flex-1" />
+              <Button
+                onClick={() => setView('builder')}
+                disabled={!descargas.pdf}
+                title={descargas.pdf ? '' : 'Descargá primero el PDF renombrado: Etapa 1 y 2 trabajan sobre ese PDF.'}
+                data-continuar
+              >
+                Continuar a Etapa 1 <ArrowRight size={14} />
+              </Button>
+            </div>
+
+            {avisoEscritura && <p className="mt-1.5 text-[11px] text-emerald-700">{avisoEscritura}</p>}
+            {avisosColM.length > 0 && (
+              <p className="mt-1.5 text-[11px] text-amber-700">
+                <b>{avisosColM.length} aviso(s) de tipeo en la col M</b> (se reportan, no se corrigen):{' '}
+                {avisosColM.slice(0, 4).map((a) => `${a.hoja}·${a.fila} ${etiquetaAviso(a.tipo)} ${a.detalle}`).join(' · ')}
+                {avisosColM.length > 4 ? ' …' : ''}
+              </p>
+            )}
           </div>
         </div>
       )}

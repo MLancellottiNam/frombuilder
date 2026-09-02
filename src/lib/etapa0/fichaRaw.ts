@@ -111,6 +111,10 @@ export interface SheetInfo {
   filasMarcadorBloque: number;
   /** total de anotaciones = hoja + bloque */
   filasMarcador: number;
+  /** fila del header, 0-based (necesaria para reescribir la ficha en Etapa 0) */
+  headerRow?: number;
+  /** índice 0-based de la col N (Nombre interno del campo en PDF), si se detectó */
+  colCampoPdfInterno?: number;
   filasDatos: number;
   pdf: number;
   soloJson: number;
@@ -451,6 +455,8 @@ export function buildFichaRaw(sheets: RawSheet[]): FichaRawResult {
       filasMarcadorHoja,
       filasMarcadorBloque,
       filasMarcador: filasMarcadorHoja + filasMarcadorBloque,
+      headerRow: header.headerRow,
+      colCampoPdfInterno: header.cols.campoPdfInterno,
       filasDatos,
       pdf: deEstaHoja.filter((r) => r.destino === 'pdf').length,
       soloJson: deEstaHoja.filter((r) => r.destino === 'solo-json').length,
