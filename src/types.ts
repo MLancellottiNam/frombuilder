@@ -227,4 +227,50 @@ export interface Project {
   form: FormDefinition;
   pool: string[]; // sourceNames not yet placed
   acroForms: AcroField[]; // real PDF field names for Etapa 2 (binding)
+  etapa0?: Etapa0State; // renombrado asistido (Etapa 0), para retomarlo después
+}
+
+// --- Etapa 0: estado persistible del renombrado ----------------------------
+// Los archivos (ficha .xlsx y PDF crudo) NO se guardan: solo las decisiones.
+// Al retomar, se vuelven a adjuntar y el estado se re-hidrata por nombre.
+
+export interface Etapa0Instancia {
+  codigo: string;
+  prefijo: string;
+  indice: number;
+  activa: boolean;
+}
+
+export interface Etapa0Edicion {
+  nombreNuevo: string;
+  /** `hoja|fila|codigoInstancia` — estable aunque cambie el orden de las filas */
+  filaClave: string | null;
+  tipo: string;
+  manual: boolean;
+}
+
+/** Región de una instancia, por NOMBRE de campo: sobrevive a un re-parseo. */
+export interface Etapa0Region {
+  codigo: string;
+  desdeNombre: string;
+  hastaNombre: string;
+  manual: boolean;
+}
+
+export interface Etapa0State {
+  fichaNombre?: string;
+  pdfNombre?: string;
+  hojaInstanciable: string | null;
+  /** todas las hojas del bloque repetible (raíz + hijas) */
+  hojasBloque?: string[];
+  instancias: Etapa0Instancia[];
+  /** regiones geométricas de las instancias (Fix B) */
+  regiones?: Etapa0Region[];
+  /** nombre ACTUAL del campo en el PDF -> edición */
+  ediciones: Record<string, Etapa0Edicion>;
+  limitarFuente: boolean;
+  tamanoFuente: number;
+  pdfDescargado: boolean;
+  fichaDescargada: boolean;
+  reporteDescargado: boolean;
 }

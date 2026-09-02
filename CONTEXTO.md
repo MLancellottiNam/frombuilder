@@ -195,6 +195,38 @@ Cada ítem que falla es **clickeable** y selecciona el campo.
 - **Proyecto** (.json) para guardar/cargar todo el estado, e **Importar JSON** de un
   form-definition existente (preserva `_sourcePdf`, ids y `sourceMeta`).
 
+### 5.8 Etapa 0 — Renombrado asistido (v1.0.0 → v1.5.0, + v1.4.1)
+
+La ficha cruda del INS viene con la **col N vacía** y los AcroNames del PDF **mienten**
+(en el CSC `Profesión` es en realidad el Detalle del domicilio extranjero). Etapa 0 toma
+la **ficha cruda + el PDF crudo** y devuelve el **PDF renombrado** y la **ficha con la col N
+completada**, para que el bind de Etapa 2 sea 1:1 exacto.
+
+Módulos (`src/lib/etapa0/`):
+
+| archivo | qué hace |
+|---|---|
+| `fichaRaw.ts` | aplana las 13 hojas, detecta el header de 14 columnas y las **4 exclusiones**, más las **filas-nota** (col C con prosa descriptiva en vez de un nombre de campo). La señal de fila-nota es **estructural** —sin label (D), sin tipo (E), sin path JSON (M)— y se puntúa: el largo del texto es una señal débil a propósito, porque en el CSC las preguntas PEP tienen 16-23 palabras y son campos reales mientras «Dentro de datosFormulario» tiene 3 y es nota. Un marcador `NO APLICA` real cumple **3 condiciones** (`NO APLICA` + (`HOJA`\|`SECCION`) + `FORMULARIO`); nunca se escanean J ni N (usan “No aplica” como enum) y el marcador de bloque solo vale en col G. Precedencia: **contrato JSON primero** (`A === 'JSON'`), después hoja, bloque, sin-campo-pdf. Cada fila lleva `motivo` y `hojaAplica`. |
+| `pdfFields.ts` | walk **crudo** del AcroForm (no la API de alto nivel de pdf-lib). Orden de lectura `(page, -Y, X)`. Un nodo con kids sin `/T` es **un** campo con N widgets. Marca `multiWidgetSospechoso` (`/Tx` con >1 widget = colisión del PDF original). |
+| `acroName.ts` | instancias del bloque repetible (ASG/PJR/RPL, expansión **instancia-mayor**) y el nombre propuesto `prefijo + slug(C) + [slug(F)]`. El bloque repetible incluye sus **hojas hijas** según el índice (`datosFormulario.personas.direccion` es hija de `personas`, o sea el PDF la repite por instancia). Los grupos de opciones se detectan por **nombre base consecutivo** —la misma clave con la que se genera el nombre—, no por col D. Las colisiones **se marcan, no se desambiguan con contador ciego**. |
+| `align.ts` | Needleman-Wunsch con huecos tolerados. La señal confiable es la **posición**; el texto del AcroName solo **suma** (`BOOST_TEXTO`), nunca resta. El 1:N (fecha partida en día/mes/año) se modela **dentro del DP**, no en un post-paso. `alinearPorSegmentos` corre ese mismo algoritmo **por región** y nunca cruza el límite: una fila sin campo en su región queda huérfana en vez de robarle el campo a otra instancia. |
+| `regiones.ts` | **Anclas por texto** (Fix C): el PDF trae la etiqueta impresa al lado de cada campo y la col C de la ficha *es* esa etiqueta (col F para las opciones de un grupo). Los pares inequívocos quedan fijos y el DP alinea solo el resto; NO se exige monotonía, porque el desorden ficha↔PDF dentro del bloque es real y pedirla descarta justo las anclas que lo arreglan. Una opción cuyo grupo tiene anclas en la región pero que no aparece en ninguna etiqueta es **foránea**: vive en otra región y no se fuerza (así se reparten 5 física / 4 jurídica). También expone `evidenciaEnContra`: cuando la etiqueta impresa identifica a otra fila, o cuando una casilla cae en la banda de un grupo al que la fila no pertenece, el par se degrada a `revisar`. Los tramos libres se parten en **zonas contiguas** (`construirSegmentos`): juntos, "Lugar" y "Fecha" se iban a los campos de la firma del pie de la página 2. |
+| `regiones.ts` (regiones) | Cada instancia ocupa una **región** del PDF (rango contiguo del orden de lectura). Se siembra en dos pasos: (1) los **grupos de opciones** del bloque repetible se buscan en el texto del PDF y un grupo que aparece tantas veces como instancias ancla la banda *k* a la instancia *k*; (2) el borde exacto sale del **mayor salto vertical** entre campos consecutivos de la zona ambigua (en el CSC 27pt contra 20-21pt internos: cae en y=339). El cambio de página es un salto infinito. La siembra es orientativa: el usuario corrige `desdeLeaf`/`hastaLeaf` con dos selects por instancia y las regiones se pintan como bandas de color en el preview. |
+| `writePdf.ts` | escribe el PDF renombrado sobre el dict crudo: aplana `/AcroForm/Fields` (Signframe necesita nombres planos), baja los heredables (`FT`, `Ff`, `DA`, `Q`, `MaxLen`, `Opt`) antes de desenganchar el `/Parent`, limpia `/V` `/DV` `/TU` `/TM` `/RV`, pone `/AS /Off` en los `/Btn`, topea el tamaño de fuente del `/DA` (default 10pt) y setea `/NeedAppearances`. **Los renombrados circulares no necesitan nombre intermedio**: el renombre se aplica sobre la identidad del objeto, no sobre una tabla por nombre. |
+| `writeFicha.ts` | reescribe el mismo `.xlsx` completando **solo la col N** de las filas que van al PDF (solo-JSON y excluidas quedan vacías). Además `detectarAvisosColM`: erratas de tipeo **genéricas** (grafía inconsistente, no-ASCII, mayúscula inicial, espacios, punto doble) — **se reportan, no se corrigen**. |
+| `reporte.ts` | CSV con asignados, huérfanos de los dos lados, colisiones, avisos de col M y la nota de ausencia de `/Sig`. |
+
+UI (`src/components/etapa0/`): `Etapa0Screen` (dos paneles + stats + panel de hand-off),
+`TablaCampos` (tabla editable centrada en el campo del PDF, con bulk edit y colisiones en
+rojo) y `PdfPreview` (render con `pdfjs-dist` + overlay clickeable, azul=alta,
+ámbar=media/revisar, rojo=colisión, gris=sin asignar).
+
+El hand-off es un checklist de 4 pasos y **“Continuar a Etapa 1” queda deshabilitado hasta
+descargar el PDF renombrado**: si el PDF entra a Signframe antes del renombrado, el
+`sourceMeta` queda clavado a los nombres genéricos. El estado de Etapa 0 (instancias,
+ediciones, tope de fuente, descargas hechas) se guarda dentro del **proyecto .json**; los
+archivos no viajan.
+
 ---
 
 ## 6. Estado verificado (evidencia)
@@ -250,6 +282,11 @@ app puede **re-importar** el resultado para revisión visual final.
 
 ## 9. Próximos pasos abiertos
 
+0. **Etapa 0, huecos de vocabulario ficha↔PDF.** Quedan ~28 pares en `revisar` sobre el
+   CSC, y buena parte arranca de que la ficha y el PDF nombran la misma cosa distinto:
+   la ficha dice «Física» donde el PDF imprime «Cédula», así que esa casilla no se puede
+   anclar por texto y arrastra a las vecinas. Un diccionario de sinónimos editable por
+   formulario (o por producto) los cerraría sin tocar el algoritmo.
 1. **`SKILL.md` / `CLAUDE.md`** para la última milla híbrida (tomar el esqueleto
    validado + la ficha y generar `autoFillConcat`, repeaters, enfermedades,
    `excludeFromJson`).

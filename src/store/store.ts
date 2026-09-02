@@ -6,6 +6,7 @@ import type {
   FieldType,
   FormDefinition,
   IdConvention,
+  Etapa0State,
   Project,
   Section,
   SourceField,
@@ -42,6 +43,8 @@ interface StoreState {
 
   // --- Etapa 2: PDF binding ---
   loadAcroForms: (list: AcroField[]) => void;
+  /** Etapa 0: guarda las decisiones del renombrado dentro del proyecto. */
+  setEtapa0: (e: Etapa0State) => void;
   /** Preserve the Signframe _sourcePdf ground-truth so export keeps it. */
   setSourcePdfMeta: (sp: unknown) => void;
   setPdf: (url: string | null, name: string | null) => void;
@@ -185,6 +188,8 @@ export const useStore = create<StoreState>((set, get) => ({
 
   loadAcroForms: (list) =>
     set((state) => ({ project: { ...state.project, acroForms: list } })),
+
+  setEtapa0: (e) => set((state) => ({ project: { ...state.project, etapa0: e } })),
 
   setSourcePdfMeta: (sp) =>
     set((state) => ({ project: { ...state.project, form: { ...state.project.form, _sourcePdf: sp } } })),

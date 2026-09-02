@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 import type { PdfLeaf } from '../../lib/etapa0/pdfFields';
+import { colorRegion, type Region } from '../../lib/etapa0/regiones';
 
 /** Overlay ya proyectado a píxeles del canvas. */
 interface Box {
@@ -8,6 +9,14 @@ interface Box {
   left: number;
   top: number;
   width: number;
+  height: number;
+}
+
+/** Banda de fondo de una región, proyectada a píxeles del canvas. */
+interface Banda {
+  codigo: string;
+  idx: number;
+  top: number;
   height: number;
 }
 
@@ -21,11 +30,26 @@ export default function PdfPreview({
   leaves,
   selected,
   onSelect,
+  confianza,
+  nombreFinal,
+  colisiones,
+  regiones,
+  regionPorLeaf,
 }: {
   file: File | null;
   leaves: PdfLeaf[];
   selected: string | null;
   onSelect: (name: string) => void;
+  /** leafName -> confianza de la pre-alineación (pinta el overlay) */
+  confianza?: Map<string, string>;
+  /** leafName(actual) -> nombre final que va a escribirse */
+  nombreFinal?: Map<string, string>;
+  /** nombres finales duplicados: se pintan en rojo y bloquean la descarga */
+  colisiones?: Set<string>;
+  /** regiones de las instancias, para pintarlas como bandas de fondo */
+  regiones?: Region[];
+  /** leafIdx -> código de instancia */
+  regionPorLeaf?: Map<number, string>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -34,6 +58,7 @@ export default function PdfPreview({
   const [pageCount, setPageCount] = useState(0);
   const [scale, setScale] = useState(1.25);
   const [boxes, setBoxes] = useState<Box[]>([]);
+  const [bandas, setBandas] = useState<Banda[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -108,11 +133,33 @@ export default function PdfPreview({
         }
       }
       setBoxes(out);
+
+      // Bandas de región: el rango vertical que ocupan sus campos en ESTA
+      // página. Se ve de un vistazo si una región quedó corrida.
+      const bs: Banda[] = [];
+      (regiones ?? []).forEach((r, idx) => {
+        let minTop = Infinity;
+        let maxBottom = -Infinity;
+        for (let j = r.desdeLeaf; j <= r.hastaLeaf; j++) {
+          const l = leaves[j];
+          if (!l) continue;
+          for (const w of l.widgets) {
+            if (w.page !== page - 1) continue;
+            const [, y1] = viewport.convertToViewportPoint(w.rect.x, w.rect.y);
+            const [, y2] = viewport.convertToViewportPoint(w.rect.x, w.rect.y + w.rect.h);
+            minTop = Math.min(minTop, y1, y2);
+            maxBottom = Math.max(maxBottom, y1, y2);
+          }
+        }
+        if (!Number.isFinite(minTop)) return;
+        bs.push({ codigo: r.codigo, idx, top: minTop - 4, height: maxBottom - minTop + 8 });
+      });
+      setBandas(bs);
     })();
     return () => {
       cancelled = true;
     };
-  }, [page, scale, pageCount, leaves]);
+  }, [page, scale, pageCount, leaves, regiones]);
 
   // Al seleccionar desde la tabla: saltar a su página y hacer scroll.
   useEffect(() => {
@@ -180,25 +227,71 @@ export default function PdfPreview({
       <div ref={wrapRef} className="flex-1 overflow-auto scroll-thin bg-slate-200 p-3">
         <div className="relative inline-block shadow-sm" style={{ lineHeight: 0 }}>
           <canvas ref={canvasRef} className="block bg-white" />
+          {bandas.map((b) => (
+            <div
+              key={b.codigo}
+              data-banda={b.codigo}
+              className="absolute left-0 right-0 pointer-events-none"
+              style={{
+                top: b.top,
+                height: b.height,
+                background: colorRegion(b.idx, 0.07),
+                borderTop: `2px solid ${colorRegion(b.idx, 0.5)}`,
+                borderBottom: `2px solid ${colorRegion(b.idx, 0.5)}`,
+              }}
+            >
+              <span
+                className="absolute right-1 top-1 rounded px-1 text-[9px] font-mono"
+                style={{ background: colorRegion(b.idx, 0.85), color: 'white' }}
+              >
+                {b.codigo}
+              </span>
+            </div>
+          ))}
           {boxes.map((b, i) => {
             const isSel = b.leaf.name === selected;
+            // alta=azul · media/revisar=ámbar · sin asignar=gris
+            const conf = confianza?.get(b.leaf.name);
+            const final = nombreFinal?.get(b.leaf.name) ?? b.leaf.name;
+            const choca = colisiones?.has(final) ?? false;
+            const tono = choca
+              ? 'border-red-500 bg-red-500/25 hover:bg-red-500/35'
+              :
+              conf === 'alta'
+                ? 'border-blue-500/80 bg-blue-500/15 hover:bg-blue-500/25'
+                : conf === 'media' || conf === 'revisar'
+                  ? 'border-amber-500/80 bg-amber-500/20 hover:bg-amber-500/30'
+                  : 'border-slate-400/70 bg-slate-400/10 hover:bg-slate-400/20';
+            const tonoBadge = choca
+              ? 'bg-red-600 text-white'
+              :
+              conf === 'alta'
+                ? 'bg-blue-100 text-blue-800'
+                : conf === 'media' || conf === 'revisar'
+                  ? 'bg-amber-100 text-amber-800'
+                  : 'bg-slate-200 text-slate-600';
             return (
               <button
                 key={i}
                 data-box={b.leaf.name}
-                title={`#${b.leaf.readingIndex} · ${b.leaf.name} · ${b.leaf.ft}`}
+                title={
+                `#${b.leaf.readingIndex} · ${b.leaf.name} · ${b.leaf.ft}` +
+                (regionPorLeaf?.get(b.leaf.readingIndex - 1)
+                  ? ` · región ${regionPorLeaf.get(b.leaf.readingIndex - 1)}`
+                  : '')
+              }
                 onClick={() => onSelect(b.leaf.name)}
                 className={`absolute border transition-colors ${
-                  isSel ? 'border-brand-600 bg-brand-500/25' : 'border-brand-500/70 bg-brand-500/10 hover:bg-brand-500/20'
+                  isSel ? 'border-brand-600 bg-brand-500/30 ring-1 ring-brand-600' : tono
                 }`}
                 style={{ left: b.left, top: b.top, width: b.width, height: b.height }}
               >
                 <span
                   className={`absolute left-0 -top-[13px] whitespace-nowrap rounded px-1 text-[9px] leading-[13px] font-mono ${
-                    isSel ? 'bg-brand-600 text-white' : 'bg-brand-100 text-brand-800'
+                    isSel ? 'bg-brand-600 text-white' : tonoBadge
                   }`}
                 >
-                  {b.leaf.readingIndex}. {b.leaf.name}
+                  {b.leaf.readingIndex}. {final}
                 </span>
               </button>
             );

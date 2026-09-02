@@ -1,8 +1,19 @@
-import { useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Upload, FileSignature, FileText, Search } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
+  Circle,
+  Download,
+  FileSignature,
+  FileSpreadsheet,
+  FileText,
+  Search,
+  Upload,
+} from 'lucide-react';
 import { useStore } from '../../store/store';
 import { Button } from '../ui';
-import { readFichaRaw, type FichaRawResult, type RowDestino } from '../../lib/etapa0/fichaRaw';
+import { readFichaRaw, norm, type FichaRawResult, type RowDestino } from '../../lib/etapa0/fichaRaw';
 import { readPdfFields, type PdfFieldsResult } from '../../lib/etapa0/pdfFields';
 import {
   detectarBloquesInstanciables,
@@ -10,9 +21,69 @@ import {
   expandirInstancias,
   generarNombres,
   contarColisiones,
+  marcarGruposDeOpciones,
   type Instancia,
 } from '../../lib/etapa0/acroName';
+import { alinear, alinearPorSegmentos, type Asignacion, type Confianza, type Segmento } from '../../lib/etapa0/align';
+import {
+  anclasDeTexto,
+  colorRegion,
+  construirSegmentos,
+  evidenciaEnContra,
+  extraerTextoPdf,
+  sembrarRegiones,
+  type BandaOpciones,
+  type FilaAncla,
+  type GrupoOpciones,
+  type Region,
+  type TextItem,
+} from '../../lib/etapa0/regiones';
+import { escribirPdfRenombrado } from '../../lib/etapa0/writePdf';
+import { escribirFichaConColN, detectarAvisosColM, etiquetaAviso, type ValoresColN } from '../../lib/etapa0/writeFicha';
+import { construirReporte } from '../../lib/etapa0/reporte';
+import { downloadCsv } from '../../lib/matrixOut';
+import { slugify } from '../../lib/exporter';
+import TablaCampos, { nombreEfectivo, type Ediciones } from './TablaCampos';
 import PdfPreview from './PdfPreview';
+
+/** Clave estable de una fila de ficha (sobrevive a reordenamientos). */
+function claveFila(hoja: string, fila: number, codigo?: string | null): string {
+  return `${hoja}|${fila}|${codigo ?? ''}`;
+}
+
+function descargarBytes(bytes: Uint8Array, filename: string, mime: string): void {
+  const blob = new Blob([bytes.slice()], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function Paso({ ok, n, children }: { ok: boolean; n: number; children: React.ReactNode }) {
+  return (
+    <li className="flex items-start gap-1.5">
+      {ok ? (
+        <CheckCircle2 size={13} className="text-emerald-600 mt-[1px] shrink-0" />
+      ) : (
+        <Circle size={13} className="text-slate-300 mt-[1px] shrink-0" />
+      )}
+      <span className={ok ? 'text-slate-500 line-through decoration-slate-300' : 'text-slate-700'}>
+        <b className="text-slate-400 mr-1">{n}.</b>
+        {children}
+      </span>
+    </li>
+  );
+}
+
+const CONF_STYLE: Record<string, string> = {
+  alta: 'bg-blue-50 text-blue-700',
+  media: 'bg-amber-50 text-amber-700',
+  revisar: 'bg-red-50 text-red-600',
+};
 
 const DESTINO_STYLE: Record<RowDestino, string> = {
   pdf: 'bg-emerald-50 text-emerald-700',
@@ -35,6 +106,7 @@ export default function Etapa0Screen() {
   const pdfInput = useRef<HTMLInputElement>(null);
 
   const [ficha, setFicha] = useState<FichaRawResult | null>(null);
+  const [fichaFile, setFichaFile] = useState<File | null>(null);
   const [pdf, setPdf] = useState<PdfFieldsResult | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,22 +114,36 @@ export default function Etapa0Screen() {
   const [filtro, setFiltro] = useState<RowDestino | 'todas' | 'colision'>('pdf');
   const [instancias, setInstancias] = useState<Instancia[]>([]);
   const [hojaInstanciable, setHojaInstanciable] = useState<string | null>(null);
+  const [hojasBloque, setHojasBloque] = useState<string[]>([]);
+  const [textoPdf, setTextoPdf] = useState<TextItem[]>([]);
+  const [regiones, setRegiones] = useState<Region[]>([]);
+  const [avisosRegion, setAvisosRegion] = useState<string[]>([]);
   const [q, setQ] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
+  const [ediciones, setEdiciones] = useState<Ediciones>({});
+  const [limitarFuente, setLimitarFuente] = useState(true);
+  const [tamanoFuente, setTamanoFuente] = useState(10);
+  const [descargas, setDescargas] = useState({ pdf: false, ficha: false, reporte: false });
+  const [trabajando, setTrabajando] = useState<string | null>(null);
+  const [avisoEscritura, setAvisoEscritura] = useState<string | null>(null);
 
   const onFicha = async () => {
     const f = fichaInput.current?.files?.[0];
     if (!f) return;
     setError(null);
+    setFichaFile(f);
+    setDescargas((d) => ({ ...d, ficha: false, reporte: false }));
     try {
       const r = await readFichaRaw(f);
       setFicha(r);
-      const bloques = detectarBloquesInstanciables(r.rows);
+      const bloques = detectarBloquesInstanciables(r.rows, r.routing);
       if (bloques.length > 0) {
         setHojaInstanciable(bloques[0].hoja);
+        setHojasBloque(bloques[0].hojas);
         setInstancias(instanciasPorDefecto(bloques[0].codigos));
       } else {
         setHojaInstanciable(null);
+        setHojasBloque([]);
         setInstancias([]);
       }
     } catch (e) {
@@ -71,9 +157,19 @@ export default function Etapa0Screen() {
     if (!f) return;
     setError(null);
     setPdfFile(f);
+    setDescargas({ pdf: false, ficha: false, reporte: false });
+    setRegiones([]);
     try {
-      setPdf(await readPdfFields(await f.arrayBuffer()));
+      const buf = await f.arrayBuffer();
+      setPdf(await readPdfFields(buf));
       setTab('pdf');
+      // El texto del PDF es lo que ancla las regiones de las instancias.
+      try {
+        setTextoPdf(await extraerTextoPdf(buf));
+      } catch (e) {
+        setTextoPdf([]);
+        setAvisosRegion(['No se pudo leer el texto del PDF: las regiones hay que definirlas a mano. ' + String(e)]);
+      }
     } catch (e) {
       setError('PDF: ' + String(e));
     }
@@ -82,13 +178,422 @@ export default function Etapa0Screen() {
 
   const nombres = useMemo(() => {
     if (!ficha) return [];
-    const expandidas = hojaInstanciable
-      ? expandirInstancias(ficha.rows, hojaInstanciable, instancias)
+    const expandidas = hojasBloque.length
+      ? expandirInstancias(ficha.rows, hojasBloque, instancias)
       : ficha.rows.map((r) => ({ ...r, instancia: null, indiceInstancia: null }));
     return generarNombres(expandidas);
-  }, [ficha, hojaInstanciable, instancias]);
+  }, [ficha, hojasBloque, instancias]);
 
   const colisiones = useMemo(() => contarColisiones(nombres), [nombres]);
+
+  /** Solo las filas que van al PDF participan de la alineación. */
+  const filasPdf = useMemo(() => nombres.filter((n) => n.fila.destino === 'pdf'), [nombres]);
+
+  /**
+   * Grupos de opciones del bloque repetible, contados UNA sola vez (sin
+   * expandir): son las anclas con las que se siembran las regiones.
+   */
+  const gruposBloque = useMemo<GrupoOpciones[]>(() => {
+    if (!ficha || hojasBloque.length === 0) return [];
+    const filas = ficha.rows
+      .filter((r) => hojasBloque.includes(r.hoja) && r.destino === 'pdf')
+      .map((r) => ({ ...r, instancia: null, indiceInstancia: null }));
+    const esG = marcarGruposDeOpciones(filas);
+    const out: GrupoOpciones[] = [];
+    for (let i = 0; i < filas.length; ) {
+      if (!esG[i]) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j + 1 < filas.length && esG[j + 1] && norm(filas[j + 1].label) === norm(filas[i].label)) j++;
+      out.push({ label: filas[i].label, valores: filas.slice(i, j + 1).map((x) => x.valor) });
+      i = j + 1;
+    }
+    return out;
+  }, [ficha, hojasBloque]);
+
+  const activas = useMemo(() => instancias.filter((i) => i.activa), [instancias]);
+
+  const siembra = useMemo(() => {
+    if (!pdf || activas.length === 0 || textoPdf.length === 0) return null;
+    return sembrarRegiones(pdf.leaves, textoPdf, activas, gruposBloque);
+  }, [pdf, textoPdf, activas, gruposBloque]);
+
+  // Las regiones sembradas son ORIENTATIVAS: entran como estado editable y las
+  // que el usuario ya tocó (`origen === 'manual'`) no se pisan.
+  const bandas = useMemo<BandaOpciones[]>(() => siembra?.bandas ?? [], [siembra]);
+
+  useEffect(() => {
+    if (!siembra) return;
+    setAvisosRegion(siembra.avisos);
+    setRegiones((prev) => {
+      const manuales = new Map(prev.filter((r) => r.origen === 'manual').map((r) => [r.codigo, r]));
+      return siembra.regiones.map((r) => manuales.get(r.codigo) ?? r);
+    });
+  }, [siembra]);
+
+  /**
+   * Un segmento por región (filas de esa instancia contra campos de esa región)
+   * más un segmento `libre` con todo lo que queda afuera.
+   */
+  const segmentos = useMemo<Segmento[]>(() => {
+    if (!pdf || regiones.length === 0) return [];
+    const segs = construirSegmentos(
+      pdf.leaves.length,
+      regiones,
+      filasPdf.map((n) => ({ codigo: n.fila.instancia?.codigo ?? null })),
+    );
+    if (textoPdf.length === 0) return segs;
+    // Anclas por la etiqueta impresa del PDF, dentro de cada segmento.
+    for (const seg of segs) {
+      const fa: FilaAncla[] = seg.filaIdxs.map((i) => ({
+        idx: i,
+        nombrePdf: filasPdf[i].fila.nombrePdf,
+        valor: filasPdf[i].fila.valor,
+        // `partes.sufijo` no está vacío exactamente cuando la fila es una opción
+        // de un grupo: es la misma señal con la que se armó el nombre.
+        esOpcion: !!filasPdf[i].partes.sufijo,
+        grupo: filasPdf[i].partes.base,
+      }));
+      const r = anclasDeTexto(fa, pdf.leaves, seg.leafIdxs, textoPdf);
+      seg.anclas = r.anclas;
+      seg.excluirFilas = r.opcionesForaneas;
+    }
+    return segs;
+  }, [pdf, regiones, filasPdf, textoPdf]);
+
+  const align = useMemo(() => {
+    if (!pdf || filasPdf.length === 0) return null;
+    const alineables = filasPdf.map((n) => ({
+      nombrePdf: n.fila.nombrePdf,
+      valor: n.fila.valor,
+      tipo: n.fila.tipo,
+      nombrePropuesto: n.nombre,
+    }));
+    if (segmentos.length === 0) return alinear(alineables, pdf.leaves);
+    // Con regiones se alinea por segmentos, y se degrada a «revisar» todo par
+    // del que haya evidencia POSITIVA de que está mal.
+    const esOpcion = (i: number) => !!filasPdf[i].partes.sufijo;
+    return alinearPorSegmentos(alineables, pdf.leaves, segmentos, {
+      evidenciaEnContra: (i, j) =>
+        evidenciaEnContra(
+          {
+            leaves: pdf.leaves,
+            texto: textoPdf,
+            bandas,
+            claveDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.valor : filasPdf[k].fila.nombrePdf),
+            grupoDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.nombrePdf : ''),
+            filasDelSegmento: (k) => segmentos.find((sg) => sg.filaIdxs.includes(k))?.filaIdxs ?? [],
+          },
+          i,
+          j,
+        ),
+    });
+  }, [pdf, filasPdf, segmentos, textoPdf, bandas]);
+
+  /** Mueve un borde de región a mano. Queda marcada como `manual` y no se pisa. */
+  const moverRegion = (i: number, campo: 'desdeLeaf' | 'hastaLeaf', valor: number) =>
+    setRegiones((prev) =>
+      prev.map((r, j) => {
+        if (j !== i) return r;
+        const next = { ...r, [campo]: valor, origen: 'manual' as const, detalle: 'borde ajustado a mano' };
+        // Un borde invertido no tiene sentido: se arrastra el otro.
+        if (next.desdeLeaf > next.hastaLeaf) {
+          if (campo === 'desdeLeaf') next.hastaLeaf = valor;
+          else next.desdeLeaf = valor;
+        }
+        return next;
+      }),
+    );
+
+  const totalAnclas = useMemo(() => segmentos.reduce((n, s2) => n + (s2.anclas?.length ?? 0), 0), [segmentos]);
+
+  /** leafIdx -> código de instancia, para pintar las bandas y la tabla. */
+  const regionPorLeaf = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const s of segmentos) if (s.etiqueta !== 'libre') for (const j of s.leafIdxs) m.set(j, s.etiqueta);
+    return m;
+  }, [segmentos]);
+
+  // Siembra las ediciones con lo que propuso la pre-alineación. Nunca pisa lo
+  // que el usuario tocó a mano (`manual`).
+  //
+  // El estado se RECONSTRUYE en cada alineación en vez de acumularse: si no, un
+  // campo que la alineación anterior nombraba y la nueva ya no asigna se queda
+  // con el nombre viejo. Eso pasaba al llegar las regiones (el pase global
+  // sembraba 111 campos y el por regiones asigna 101) y producía colisiones
+  // fantasma con nombres de una alineación que ya no existe.
+  useEffect(() => {
+    if (!align || !pdf) return;
+    setEdiciones((prev) => {
+      const next: Ediciones = {};
+      for (const [k, v] of Object.entries(prev)) if (v.manual) next[Number(k)] = v;
+      for (const a of align.asignaciones) {
+        const propuesto = filasPdf[a.filaIdx]?.nombre ?? '';
+        a.leafIdx.forEach((li, parte) => {
+          if (next[li]?.manual) return;
+          // En una relación 1:N cada caja necesita nombre propio; se numeran por
+          // posición (estructural, no es desambiguación de colisión).
+          const nombre = propuesto && a.leafIdx.length > 1 ? `${propuesto}_${parte + 1}` : propuesto;
+          next[li] = {
+            nombreNuevo: nombre,
+            filaIdx: a.filaIdx,
+            tipo: pdf.leaves[li].ft,
+            manual: false,
+          };
+        });
+      }
+      return next;
+    });
+  }, [align, pdf, filasPdf]);
+
+  /** Nombre final de cada campo (editado o el actual) + colisiones. */
+  const colisionesPdf = useMemo(() => {
+    const cuenta = new Map<string, number>();
+    (pdf?.leaves ?? []).forEach((l, i) => {
+      const n = nombreEfectivo(l, ediciones[i]);
+      cuenta.set(n, (cuenta.get(n) ?? 0) + 1);
+    });
+    return new Set([...cuenta.entries()].filter(([, c]) => c > 1).map(([n]) => n));
+  }, [pdf, ediciones]);
+
+  /** leafName(actual) -> nombre final, para el badge del overlay. */
+  const nombreFinalPorLeaf = useMemo(() => {
+    const m = new Map<string, string>();
+    (pdf?.leaves ?? []).forEach((l, i) => m.set(l.name, nombreEfectivo(l, ediciones[i])));
+    return m;
+  }, [pdf, ediciones]);
+
+  /** leafName -> confianza, para pintar el overlay. */
+  const confianzaPorLeaf = useMemo(() => {
+    const m = new Map<string, Confianza>();
+    if (!align || !pdf) return m;
+    for (const a of align.asignaciones) {
+      for (const li of a.leafIdx) m.set(pdf.leaves[li].name, a.confianza);
+    }
+    return m;
+  }, [align, pdf]);
+
+  /** filaIdx (dentro de filasPdf) -> asignación */
+  const asigPorFila = useMemo(() => {
+    const m = new Map<number, (typeof align extends null ? never : NonNullable<typeof align>)['asignaciones'][number]>();
+    align?.asignaciones.forEach((a) => m.set(a.filaIdx, a));
+    return m;
+  }, [align]);
+
+  /** leafIdx -> asignación de la pre-alineación (para el reporte). */
+  const asigPorLeaf = useMemo(() => {
+    const m = new Map<number, Asignacion>();
+    align?.asignaciones.forEach((a) => a.leafIdx.forEach((li) => m.set(li, a)));
+    return m;
+  }, [align]);
+
+  /** Erratas de tipeo de la col M. Se reportan, NO se corrigen. */
+  const avisosColM = useMemo(() => (ficha ? detectarAvisosColM(ficha.rows) : []), [ficha]);
+
+  // --- v1.5.0: escritura --------------------------------------------------
+
+  const baseNombre = useMemo(
+    () => slugify((pdfFile?.name ?? ficha?.sheets[0]?.name ?? 'formulario').replace(/\.pdf$/i, '')),
+    [pdfFile, ficha],
+  );
+
+  /** leafIdx -> fila de ficha asignada (según la edición vigente). */
+  const filaDeLeaf = (i: number) => {
+    const idx = ediciones[i]?.filaIdx;
+    return idx == null ? null : (filasPdf[idx] ?? null);
+  };
+
+  const doDescargarPdf = async () => {
+    if (!pdfFile || !pdf) return;
+    if (colisionesPdf.size > 0) {
+      setError('Hay colisiones de nombre: resolvelas antes de escribir el PDF.');
+      return;
+    }
+    setTrabajando('pdf');
+    setError(null);
+    try {
+      const renombres = new Map<string, string>();
+      pdf.leaves.forEach((l, i) => {
+        const final = nombreEfectivo(l, ediciones[i]);
+        if (final !== l.name) renombres.set(l.name, final);
+      });
+      const r = await escribirPdfRenombrado(await pdfFile.arrayBuffer(), renombres, {
+        limitarFuente,
+        tamanoFuente,
+      });
+      descargarBytes(r.bytes, `${baseNombre}-renombrado.pdf`, 'application/pdf');
+      setDescargas((d) => ({ ...d, pdf: true }));
+      setAvisoEscritura(
+        `PDF escrito: ${r.renombrados} de ${r.campos} campos renombrados, ${r.limpiados} con valor borrado.` +
+          (r.warnings.length ? ' · ' + r.warnings.join(' · ') : ''),
+      );
+    } catch (e) {
+      setError('No se pudo escribir el PDF: ' + String(e));
+    } finally {
+      setTrabajando(null);
+    }
+  };
+
+  const doDescargarFicha = async () => {
+    if (!fichaFile || !ficha || !pdf) return;
+    setTrabajando('ficha');
+    setError(null);
+    try {
+      // Una fila de ficha puede corresponder a varios campos del PDF (1:N, y
+      // también las instancias, que comparten la fila de origen). Se listan
+      // todos separados por coma: la col N tiene que decir la verdad completa.
+      const porFila = new Map<string, { hoja: string; fila: number; nombres: string[] }>();
+      pdf.leaves.forEach((l, i) => {
+        const np = filaDeLeaf(i);
+        if (!np) return;
+        const k = claveFila(np.fila.hoja, np.fila.fila);
+        if (!porFila.has(k)) porFila.set(k, { hoja: np.fila.hoja, fila: np.fila.fila, nombres: [] });
+        porFila.get(k)!.nombres.push(nombreEfectivo(l, ediciones[i]));
+      });
+      const valores: ValoresColN = new Map();
+      for (const { hoja, fila, nombres } of porFila.values()) {
+        if (!valores.has(hoja)) valores.set(hoja, new Map());
+        valores.get(hoja)!.set(fila, nombres.join(', '));
+      }
+      const colPorHoja = new Map(ficha.sheets.map((s) => [s.name, s.colCampoPdfInterno]));
+      const r = await escribirFichaConColN(await fichaFile.arrayBuffer(), valores, { colPorHoja });
+      descargarBytes(
+        r.bytes,
+        `${baseNombre}-ficha-col-n.xlsx`,
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      setDescargas((d) => ({ ...d, ficha: true }));
+      setAvisoEscritura(
+        `Ficha escrita: ${r.celdasEscritas} celdas de col N en ${r.hojasTocadas} hoja(s).` +
+          (r.warnings.length ? ' · ' + r.warnings.join(' · ') : ''),
+      );
+    } catch (e) {
+      setError('No se pudo escribir la ficha: ' + String(e));
+    } finally {
+      setTrabajando(null);
+    }
+  };
+
+  const doDescargarReporte = () => {
+    if (!pdf) return;
+    const rep = construirReporte({
+      leaves: pdf.leaves,
+      nombreFinal: (i) => nombreEfectivo(pdf.leaves[i], ediciones[i]),
+      filaDeLeaf,
+      confianzaDeLeaf: (i) => asigPorLeaf.get(i)?.confianza,
+      motivosDeLeaf: (i) => asigPorLeaf.get(i)?.motivos ?? [],
+      huerfanosFicha: (align?.huerfanosFicha ?? []).map((idx) => filasPdf[idx]).filter(Boolean),
+      colisiones: colisionesPdf,
+      avisosColM,
+    });
+    downloadCsv(rep.csv, `${baseNombre}-reporte-etapa0.csv`);
+    setDescargas((d) => ({ ...d, reporte: true }));
+    setAvisoEscritura(
+      `Reporte: ${rep.resumen.asignados} asignados · ${rep.resumen.huerfanosPdf} huérfanos PDF · ` +
+        `${rep.resumen.huerfanosFicha} huérfanos ficha · ${rep.resumen.colisiones} colisiones · ${rep.resumen.avisos} avisos col M.`,
+    );
+  };
+
+  // --- persistencia dentro del proyecto ------------------------------------
+
+  const etapa0Guardado = useStore((s) => s.project.etapa0);
+  const setEtapa0 = useStore((s) => s.setEtapa0);
+  const hidratado = useRef({ ficha: false, pdf: false });
+
+  // Hidratar instancias cuando entra la ficha.
+  useEffect(() => {
+    if (!ficha || hidratado.current.ficha) return;
+    hidratado.current.ficha = true;
+    const g = etapa0Guardado;
+    if (!g) return;
+    if (g.hojaInstanciable) setHojaInstanciable(g.hojaInstanciable);
+    if (g.hojasBloque?.length) setHojasBloque(g.hojasBloque);
+    if (g.instancias.length) setInstancias(g.instancias);
+    setLimitarFuente(g.limitarFuente);
+    setTamanoFuente(g.tamanoFuente);
+  }, [ficha, etapa0Guardado]);
+
+  // Hidratar ediciones cuando entra el PDF (se re-atan por nombre y por clave
+  // de fila; los índices no sobreviven a un cambio de instancias).
+  useEffect(() => {
+    if (!pdf || hidratado.current.pdf) return;
+    hidratado.current.pdf = true;
+    const g = etapa0Guardado;
+    if (!g) return;
+    // Regiones guardadas a mano: se re-atan por nombre de campo.
+    const guardadasManual = (g.regiones ?? []).filter((r) => r.manual);
+    if (guardadasManual.length) {
+      const idxDe = new Map(pdf.leaves.map((l, i) => [l.name, i]));
+      setRegiones(
+        guardadasManual
+          .map((r) => ({
+            codigo: r.codigo,
+            desdeLeaf: idxDe.get(r.desdeNombre) ?? -1,
+            hastaLeaf: idxDe.get(r.hastaNombre) ?? -1,
+            origen: 'manual' as const,
+            detalle: 'borde ajustado a mano (restaurado del proyecto)',
+          }))
+          .filter((r) => r.desdeLeaf >= 0 && r.hastaLeaf >= 0),
+      );
+    }
+    if (!Object.keys(g.ediciones).length) return;
+    const porClave = new Map(filasPdf.map((n, i) => [claveFila(n.fila.hoja, n.fila.fila, n.fila.instancia?.codigo), i]));
+    setEdiciones((prev) => {
+      const next: Ediciones = { ...prev };
+      pdf.leaves.forEach((l, i) => {
+        const e = g.ediciones[l.name];
+        if (!e) return;
+        next[i] = {
+          nombreNuevo: e.nombreNuevo,
+          filaIdx: e.filaClave != null ? (porClave.get(e.filaClave) ?? null) : null,
+          tipo: e.tipo,
+          manual: e.manual,
+        };
+      });
+      return next;
+    });
+  }, [pdf, etapa0Guardado, filasPdf]);
+
+  // Guardar (solo decisiones; los archivos no viajan en el proyecto).
+  useEffect(() => {
+    if (!ficha && !pdf) return;
+    const eds: Record<string, import('../../types').Etapa0Edicion> = {};
+    (pdf?.leaves ?? []).forEach((l, i) => {
+      const e = ediciones[i];
+      if (!e) return;
+      const np = e.filaIdx == null ? null : filasPdf[e.filaIdx];
+      eds[l.name] = {
+        nombreNuevo: e.nombreNuevo,
+        filaClave: np ? claveFila(np.fila.hoja, np.fila.fila, np.fila.instancia?.codigo) : null,
+        tipo: e.tipo,
+        manual: e.manual,
+      };
+    });
+    setEtapa0({
+      fichaNombre: fichaFile?.name,
+      pdfNombre: pdfFile?.name,
+      hojaInstanciable,
+      hojasBloque,
+      instancias,
+      regiones: regiones.map((r) => ({
+        codigo: r.codigo,
+        desdeNombre: pdf?.leaves[r.desdeLeaf]?.name ?? '',
+        hastaNombre: pdf?.leaves[r.hastaLeaf]?.name ?? '',
+        manual: r.origen === 'manual',
+      })),
+      ediciones: eds,
+      limitarFuente,
+      tamanoFuente,
+      pdfDescargado: descargas.pdf,
+      fichaDescargada: descargas.ficha,
+      reporteDescargado: descargas.reporte,
+    });
+  }, [
+    ficha, pdf, fichaFile, pdfFile, hojaInstanciable, hojasBloque, instancias, regiones, ediciones, filasPdf,
+    limitarFuente, tamanoFuente, descargas, setEtapa0,
+  ]);
 
   const filasFicha = useMemo(() => {
     const base =
@@ -105,11 +610,6 @@ export default function Etapa0Screen() {
       : base;
   }, [nombres, filtro, q]);
 
-  const leavesFiltradas = useMemo(() => {
-    if (!pdf) return [];
-    const s = q.toLowerCase();
-    return s ? pdf.leaves.filter((l) => l.name.toLowerCase().includes(s)) : pdf.leaves;
-  }, [pdf, q]);
 
   return (
     <div className="h-screen flex flex-col bg-slate-100">
@@ -121,7 +621,7 @@ export default function Etapa0Screen() {
         <span className="font-bold text-slate-800 flex items-center gap-1.5">
           <FileSignature size={16} /> Etapa 0 · Renombrado asistido
         </span>
-        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.2.0 · nombres propuestos</span>
+        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.5.0 · escritura y hand-off</span>
         <div className="flex-1" />
         <input ref={fichaInput} type="file" accept=".xlsx,.xls" hidden onChange={onFicha} />
         <input ref={pdfInput} type="file" accept="application/pdf,.pdf" hidden onChange={onPdf} />
@@ -148,12 +648,27 @@ export default function Etapa0Screen() {
                 <Stat n={ficha.stats.pdf} l="van al PDF" tone="text-emerald-700" />
                 <Stat n={ficha.stats.soloJson} l="solo JSON" />
                 <Stat n={ficha.stats.excluidas} l="excluidas" tone="text-red-600" />
+                <Stat
+                  n={ficha.stats.filasNota}
+                  l="filas-nota"
+                  tone={ficha.stats.filasNota ? 'text-amber-600' : 'text-slate-700'}
+                />
                 <Stat n={ficha.stats.filasMarcadorHoja} l="marcador hoja" />
                 <Stat
                   n={Object.keys(colisiones).length}
                   l="colisiones"
                   tone={Object.keys(colisiones).length ? 'text-red-600' : 'text-slate-700'}
                 />
+              </>
+            )}
+            {regiones.length > 0 && <Stat n={regiones.length} l="regiones" tone="text-brand-700" />}
+            {totalAnclas > 0 && <Stat n={totalAnclas} l="anclas por texto" tone="text-brand-700" />}
+            {align && (
+              <>
+                <Stat n={`${align.stats.pctAlta}%`} l="confianza alta" tone="text-emerald-700" />
+                <Stat n={align.stats.media} l="media" tone="text-amber-600" />
+                <Stat n={align.stats.revisar} l="revisar" tone="text-red-600" />
+                <Stat n={align.stats.relaciones1aN} l="1:N" />
               </>
             )}
             {pdf && (
@@ -186,6 +701,25 @@ export default function Etapa0Screen() {
                 {l.name} ×{l.widgets.length} [p{l.paginas.map((x) => x + 1).join(',')}]
               </button>
             ))}
+          </div>
+        )}
+        {align && (align.huerfanosFicha.length > 0 || align.huerfanosPdf.length > 0) && (
+          <div className="mt-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-[11px] text-slate-600">
+            <b>Huérfanos</b> — {align.huerfanosFicha.length} fila(s) de ficha sin campo PDF ·{' '}
+            {align.huerfanosPdf.length} campo(s) PDF sin fila.{' '}
+            {align.huerfanosPdf.length > 0 && (
+              <span className="text-slate-400">
+                ({align.huerfanosPdf.slice(0, 8).map((i) => pdf!.leaves[i].name).join(', ')}
+                {align.huerfanosPdf.length > 8 ? '…' : ''})
+              </span>
+            )}
+          </div>
+        )}
+        {colisionesPdf.size > 0 && (
+          <div className="mt-2 rounded-md border border-red-400 bg-red-50 px-3 py-2 text-[11px] text-red-700">
+            <b>{colisionesPdf.size} colisión(es) de nombre en el PDF</b> — bloquean la descarga del PDF renombrado hasta
+            resolverlas: {[...colisionesPdf].slice(0, 10).join(' · ')}
+            {colisionesPdf.size > 10 ? '…' : ''}
           </div>
         )}
         {Object.keys(colisiones).length > 0 && (
@@ -244,6 +778,163 @@ export default function Etapa0Screen() {
                 </div>
               ))}
             </div>
+
+            {/* Regiones: primer y último campo de cada instancia */}
+            {pdf && (
+              <div className="mt-2 pt-2 border-t border-slate-100" data-regiones>
+                <div className="text-[11px] font-medium text-slate-600 mb-1">
+                  Región de cada instancia en el PDF — la alineación corre <b>dentro</b> de la región y nunca cruza el
+                  límite. La siembra automática es orientativa: si algo quedó corrido, mové el primer o el último campo.
+                </div>
+                {regiones.length === 0 && (
+                  <p className="text-[11px] text-amber-700">
+                    No se pudo sembrar ninguna región: la alineación cae al pase global. Elegí el primer y último campo
+                    de cada instancia.
+                  </p>
+                )}
+                {regiones.map((r, i) => (
+                  <div key={r.codigo} className="flex flex-wrap items-center gap-1.5 text-[11px] mb-1">
+                    <span
+                      className="w-10 font-medium rounded px-1"
+                      style={{ background: colorRegion(i, 0.18), color: colorRegion(i, 1) }}
+                    >
+                      {r.codigo}
+                    </span>
+                    <span className="text-slate-400">desde</span>
+                    <select
+                      value={r.desdeLeaf}
+                      data-region-desde={r.codigo}
+                      onChange={(e) => moverRegion(i, 'desdeLeaf', Number(e.target.value))}
+                      className="rounded border border-slate-300 px-1 py-0.5 max-w-[220px]"
+                    >
+                      {pdf.leaves.map((l, j) => (
+                        <option key={j} value={j}>
+                          #{l.readingIndex} p{l.page + 1} · {l.name}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-slate-400">hasta</span>
+                    <select
+                      value={r.hastaLeaf}
+                      data-region-hasta={r.codigo}
+                      onChange={(e) => moverRegion(i, 'hastaLeaf', Number(e.target.value))}
+                      className="rounded border border-slate-300 px-1 py-0.5 max-w-[220px]"
+                    >
+                      {pdf.leaves.map((l, j) => (
+                        <option key={j} value={j}>
+                          #{l.readingIndex} p{l.page + 1} · {l.name}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-slate-500">
+                      {Math.max(0, r.hastaLeaf - r.desdeLeaf + 1)} campos ·{' '}
+                      {segmentos.find((x) => x.etiqueta === r.codigo)?.filaIdxs.length ?? 0} filas
+                    </span>
+                    <span className="text-slate-400" title={r.detalle}>
+                      {r.origen === 'manual' ? '(a mano)' : `(${r.origen})`}
+                    </span>
+                  </div>
+                ))}
+                {avisosRegion.length > 0 && (
+                  <details className="text-[11px] text-slate-500 mt-1">
+                    <summary className="cursor-pointer" data-avisos-regiones>
+                      {avisosRegion.length} aviso(s) de la siembra de regiones
+                    </summary>
+                    <ul className="list-disc pl-4 mt-0.5">
+                      {avisosRegion.map((a, i) => (
+                        <li key={i}>{a}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Hand-off: escribir y pasar a Etapa 1 */}
+      {ficha && pdf && (
+        <div className="px-3 pb-2 shrink-0">
+          <div className="rounded-md border border-slate-200 bg-white px-3 py-2" data-handoff>
+            <div className="flex flex-wrap items-start gap-4">
+              <ol className="text-[11px] space-y-0.5 min-w-[280px]">
+                <Paso ok={!!ficha && !!pdf} n={1}>
+                  Cargar la ficha cruda y el PDF crudo
+                </Paso>
+                <Paso ok={colisionesPdf.size === 0} n={2}>
+                  Resolver colisiones y revisar los <b>media</b> / <b>revisar</b>
+                </Paso>
+                <Paso ok={descargas.pdf} n={3}>
+                  Descargar el <b>PDF renombrado</b> — y recién ahí subirlo a Signframe
+                </Paso>
+                <Paso ok={descargas.ficha && descargas.reporte} n={4}>
+                  Descargar la <b>ficha con la col N</b> y el <b>reporte</b>
+                </Paso>
+              </ol>
+
+              <div className="flex flex-col gap-1.5">
+                <div className="flex flex-wrap gap-1.5">
+                  <Button
+                    onClick={doDescargarPdf}
+                    disabled={colisionesPdf.size > 0 || trabajando !== null}
+                    title={
+                      colisionesPdf.size > 0
+                        ? `Bloqueado por ${colisionesPdf.size} colisión(es) de nombre: ` +
+                          [...colisionesPdf].slice(0, 5).join(' · ') +
+                          (colisionesPdf.size > 5 ? ' …' : '')
+                        : 'Escribe el PDF con los nombres nuevos'
+                    }
+                    data-dl="pdf"
+                  >
+                    <Download size={14} /> {trabajando === 'pdf' ? 'Escribiendo…' : 'PDF renombrado'}
+                  </Button>
+                  <Button onClick={doDescargarFicha} disabled={!fichaFile || trabajando !== null} data-dl="ficha">
+                    <FileSpreadsheet size={14} /> {trabajando === 'ficha' ? 'Escribiendo…' : 'Ficha con col N'}
+                  </Button>
+                  <Button onClick={doDescargarReporte} disabled={trabajando !== null} data-dl="reporte">
+                    <FileText size={14} /> Reporte CSV
+                  </Button>
+                </div>
+                <label className="flex items-center gap-1.5 text-[11px] text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={limitarFuente}
+                    onChange={(e) => setLimitarFuente(e.target.checked)}
+                  />
+                  Topear el tamaño de fuente en
+                  <input
+                    type="number"
+                    min={4}
+                    max={24}
+                    value={tamanoFuente}
+                    onChange={(e) => setTamanoFuente(Number(e.target.value) || 10)}
+                    disabled={!limitarFuente}
+                    className="w-12 rounded border border-slate-300 px-1 py-0.5 disabled:opacity-40"
+                  />
+                  pt
+                </label>
+              </div>
+
+              <div className="flex-1" />
+              <Button
+                onClick={() => setView('builder')}
+                disabled={!descargas.pdf}
+                title={descargas.pdf ? '' : 'Descargá primero el PDF renombrado: Etapa 1 y 2 trabajan sobre ese PDF.'}
+                data-continuar
+              >
+                Continuar a Etapa 1 <ArrowRight size={14} />
+              </Button>
+            </div>
+
+            {avisoEscritura && <p className="mt-1.5 text-[11px] text-emerald-700">{avisoEscritura}</p>}
+            {avisosColM.length > 0 && (
+              <p className="mt-1.5 text-[11px] text-amber-700">
+                <b>{avisosColM.length} aviso(s) de tipeo en la col M</b> (se reportan, no se corrigen):{' '}
+                {avisosColM.slice(0, 4).map((a) => `${a.hoja}·${a.fila} ${etiquetaAviso(a.tipo)} ${a.detalle}`).join(' · ')}
+                {avisosColM.length > 4 ? ' …' : ''}
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -299,6 +990,8 @@ export default function Etapa0Screen() {
                   <tbody>
                     {filasFicha.map((n, i) => {
                       const r = n.fila;
+                      const idxEnPdf = filasPdf.indexOf(n);
+                      const asig = idxEnPdf >= 0 ? asigPorFila.get(idxEnPdf) : undefined;
                       return (
                         <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
                           <td className="px-2 py-1 text-slate-400 whitespace-nowrap">
@@ -320,9 +1013,22 @@ export default function Etapa0Screen() {
                             {n.nombre}
                           </td>
                           <td className="px-2 py-1">
-                            <span className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`} title={r.motivo}>
-                              {r.motivo ?? r.destino}
-                            </span>
+                            {asig ? (
+                              <span
+                                className={`rounded px-1 ${CONF_STYLE[asig.confianza]}`}
+                                title={[...asig.motivos, `campo(s): ${asig.leafIdx.map((li) => pdf!.leaves[li].name).join(', ')}`].join(' · ')}
+                              >
+                                {asig.confianza}
+                                {asig.leafIdx.length > 1 ? ` 1:${asig.leafIdx.length}` : ''}
+                              </span>
+                            ) : (
+                              <span
+                                className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`}
+                                title={[r.motivo, ...(r.notaSeñales ?? [])].filter(Boolean).join(' · ')}
+                              >
+                                {r.motivo ?? r.destino}
+                              </span>
+                            )}
                             {!r.hojaAplica && (
                               <span className="ml-1 rounded px-1 bg-red-50 text-red-500" title="La hoja no aplica a este formulario">
                                 hoja✕
@@ -338,39 +1044,37 @@ export default function Etapa0Screen() {
             </>
           )}
 
-          {tab === 'pdf' && (
-            <div className="flex-1 overflow-auto scroll-thin">
-              {!pdf && <p className="text-xs text-slate-400 p-4 text-center">Cargá el PDF crudo.</p>}
-              <table className="w-full text-[11px]">
-                <tbody>
-                  {leavesFiltradas.map((l) => (
-                    <tr
-                      key={l.name + l.readingIndex}
-                      onClick={() => setSelected(l.name)}
-                      className={`border-b border-slate-50 cursor-pointer ${
-                        selected === l.name ? 'bg-brand-50' : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <td className="px-2 py-1 text-slate-400 w-8 text-right">{l.readingIndex}</td>
-                      <td className="px-2 py-1 font-mono text-slate-700 truncate max-w-[240px]" title={l.name}>
-                        {l.name}
-                      </td>
-                      <td className="px-2 py-1 text-slate-400">{l.ft.replace('/', '')}</td>
-                      <td className="px-2 py-1 text-slate-400">p{l.page + 1}</td>
-                      <td className="px-2 py-1 text-slate-300">
-                        {l.widgets.length > 1 ? `${l.widgets.length}w` : ''}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          {tab === 'pdf' &&
+            (!pdf ? (
+              <p className="text-xs text-slate-400 p-4 text-center">Cargá el PDF crudo.</p>
+            ) : (
+              <TablaCampos
+                leaves={pdf.leaves}
+                filasPdf={filasPdf}
+                ediciones={ediciones}
+                setEdiciones={setEdiciones}
+                confianzaPorLeaf={confianzaPorLeaf}
+                colisiones={colisionesPdf}
+                selected={selected}
+                onSelect={setSelected}
+                query={q}
+              />
+            ))}
         </div>
 
         {/* Derecha: PDF con overlay */}
         <div className="w-1/2 min-w-0 rounded-md border border-slate-200 bg-white">
-          <PdfPreview file={pdfFile} leaves={pdf?.leaves ?? []} selected={selected} onSelect={setSelected} />
+          <PdfPreview
+            file={pdfFile}
+            leaves={pdf?.leaves ?? []}
+            regiones={regiones}
+            regionPorLeaf={regionPorLeaf}
+            selected={selected}
+            onSelect={setSelected}
+            confianza={confianzaPorLeaf}
+            nombreFinal={nombreFinalPorLeaf}
+            colisiones={colisionesPdf}
+          />
         </div>
       </div>
     </div>
