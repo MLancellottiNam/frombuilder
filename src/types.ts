@@ -249,11 +249,23 @@ export interface Etapa0Edicion {
   manual: boolean;
 }
 
+/** Región de una instancia, por NOMBRE de campo: sobrevive a un re-parseo. */
+export interface Etapa0Region {
+  codigo: string;
+  desdeNombre: string;
+  hastaNombre: string;
+  manual: boolean;
+}
+
 export interface Etapa0State {
   fichaNombre?: string;
   pdfNombre?: string;
   hojaInstanciable: string | null;
+  /** todas las hojas del bloque repetible (raíz + hijas) */
+  hojasBloque?: string[];
   instancias: Etapa0Instancia[];
+  /** regiones geométricas de las instancias (Fix B) */
+  regiones?: Etapa0Region[];
   /** nombre ACTUAL del campo en el PDF -> edición */
   ediciones: Record<string, Etapa0Edicion>;
   limitarFuente: boolean;

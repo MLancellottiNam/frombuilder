@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../../store/store';
 import { Button } from '../ui';
-import { readFichaRaw, type FichaRawResult, type RowDestino } from '../../lib/etapa0/fichaRaw';
+import { readFichaRaw, norm, type FichaRawResult, type RowDestino } from '../../lib/etapa0/fichaRaw';
 import { readPdfFields, type PdfFieldsResult } from '../../lib/etapa0/pdfFields';
 import {
   detectarBloquesInstanciables,
@@ -21,9 +21,18 @@ import {
   expandirInstancias,
   generarNombres,
   contarColisiones,
+  marcarGruposDeOpciones,
   type Instancia,
 } from '../../lib/etapa0/acroName';
-import { alinear, type Asignacion, type Confianza } from '../../lib/etapa0/align';
+import { alinear, alinearPorSegmentos, type Asignacion, type Confianza, type Segmento } from '../../lib/etapa0/align';
+import {
+  colorRegion,
+  extraerTextoPdf,
+  sembrarRegiones,
+  type GrupoOpciones,
+  type Region,
+  type TextItem,
+} from '../../lib/etapa0/regiones';
 import { escribirPdfRenombrado } from '../../lib/etapa0/writePdf';
 import { escribirFichaConColN, detectarAvisosColM, etiquetaAviso, type ValoresColN } from '../../lib/etapa0/writeFicha';
 import { construirReporte } from '../../lib/etapa0/reporte';
@@ -100,6 +109,10 @@ export default function Etapa0Screen() {
   const [filtro, setFiltro] = useState<RowDestino | 'todas' | 'colision'>('pdf');
   const [instancias, setInstancias] = useState<Instancia[]>([]);
   const [hojaInstanciable, setHojaInstanciable] = useState<string | null>(null);
+  const [hojasBloque, setHojasBloque] = useState<string[]>([]);
+  const [textoPdf, setTextoPdf] = useState<TextItem[]>([]);
+  const [regiones, setRegiones] = useState<Region[]>([]);
+  const [avisosRegion, setAvisosRegion] = useState<string[]>([]);
   const [q, setQ] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
   const [ediciones, setEdiciones] = useState<Ediciones>({});
@@ -118,12 +131,14 @@ export default function Etapa0Screen() {
     try {
       const r = await readFichaRaw(f);
       setFicha(r);
-      const bloques = detectarBloquesInstanciables(r.rows);
+      const bloques = detectarBloquesInstanciables(r.rows, r.routing);
       if (bloques.length > 0) {
         setHojaInstanciable(bloques[0].hoja);
+        setHojasBloque(bloques[0].hojas);
         setInstancias(instanciasPorDefecto(bloques[0].codigos));
       } else {
         setHojaInstanciable(null);
+        setHojasBloque([]);
         setInstancias([]);
       }
     } catch (e) {
@@ -138,9 +153,18 @@ export default function Etapa0Screen() {
     setError(null);
     setPdfFile(f);
     setDescargas({ pdf: false, ficha: false, reporte: false });
+    setRegiones([]);
     try {
-      setPdf(await readPdfFields(await f.arrayBuffer()));
+      const buf = await f.arrayBuffer();
+      setPdf(await readPdfFields(buf));
       setTab('pdf');
+      // El texto del PDF es lo que ancla las regiones de las instancias.
+      try {
+        setTextoPdf(await extraerTextoPdf(buf));
+      } catch (e) {
+        setTextoPdf([]);
+        setAvisosRegion(['No se pudo leer el texto del PDF: las regiones hay que definirlas a mano. ' + String(e)]);
+      }
     } catch (e) {
       setError('PDF: ' + String(e));
     }
@@ -149,36 +173,135 @@ export default function Etapa0Screen() {
 
   const nombres = useMemo(() => {
     if (!ficha) return [];
-    const expandidas = hojaInstanciable
-      ? expandirInstancias(ficha.rows, hojaInstanciable, instancias)
+    const expandidas = hojasBloque.length
+      ? expandirInstancias(ficha.rows, hojasBloque, instancias)
       : ficha.rows.map((r) => ({ ...r, instancia: null, indiceInstancia: null }));
     return generarNombres(expandidas);
-  }, [ficha, hojaInstanciable, instancias]);
+  }, [ficha, hojasBloque, instancias]);
 
   const colisiones = useMemo(() => contarColisiones(nombres), [nombres]);
 
   /** Solo las filas que van al PDF participan de la alineación. */
   const filasPdf = useMemo(() => nombres.filter((n) => n.fila.destino === 'pdf'), [nombres]);
 
+  /**
+   * Grupos de opciones del bloque repetible, contados UNA sola vez (sin
+   * expandir): son las anclas con las que se siembran las regiones.
+   */
+  const gruposBloque = useMemo<GrupoOpciones[]>(() => {
+    if (!ficha || hojasBloque.length === 0) return [];
+    const filas = ficha.rows
+      .filter((r) => hojasBloque.includes(r.hoja) && r.destino === 'pdf')
+      .map((r) => ({ ...r, instancia: null, indiceInstancia: null }));
+    const esG = marcarGruposDeOpciones(filas);
+    const out: GrupoOpciones[] = [];
+    for (let i = 0; i < filas.length; ) {
+      if (!esG[i]) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j + 1 < filas.length && esG[j + 1] && norm(filas[j + 1].label) === norm(filas[i].label)) j++;
+      out.push({ label: filas[i].label, valores: filas.slice(i, j + 1).map((x) => x.valor) });
+      i = j + 1;
+    }
+    return out;
+  }, [ficha, hojasBloque]);
+
+  const activas = useMemo(() => instancias.filter((i) => i.activa), [instancias]);
+
+  const siembra = useMemo(() => {
+    if (!pdf || activas.length === 0 || textoPdf.length === 0) return null;
+    return sembrarRegiones(pdf.leaves, textoPdf, activas, gruposBloque);
+  }, [pdf, textoPdf, activas, gruposBloque]);
+
+  // Las regiones sembradas son ORIENTATIVAS: entran como estado editable y las
+  // que el usuario ya tocó (`origen === 'manual'`) no se pisan.
+  useEffect(() => {
+    if (!siembra) return;
+    setAvisosRegion(siembra.avisos);
+    setRegiones((prev) => {
+      const manuales = new Map(prev.filter((r) => r.origen === 'manual').map((r) => [r.codigo, r]));
+      return siembra.regiones.map((r) => manuales.get(r.codigo) ?? r);
+    });
+  }, [siembra]);
+
+  /**
+   * Un segmento por región (filas de esa instancia contra campos de esa región)
+   * más un segmento `libre` con todo lo que queda afuera.
+   */
+  const segmentos = useMemo<Segmento[]>(() => {
+    if (!pdf || regiones.length === 0) return [];
+    const porCodigo = new Map<string, number[]>();
+    filasPdf.forEach((n, k) => {
+      const c = n.fila.instancia?.codigo ?? 'libre';
+      if (!porCodigo.has(c)) porCodigo.set(c, []);
+      porCodigo.get(c)!.push(k);
+    });
+    const usados = new Set<number>();
+    const out: Segmento[] = regiones.map((r) => {
+      const leafIdxs: number[] = [];
+      for (let j = Math.max(0, r.desdeLeaf); j <= Math.min(pdf.leaves.length - 1, r.hastaLeaf); j++) {
+        if (usados.has(j)) continue; // dos regiones no pueden compartir un campo
+        leafIdxs.push(j);
+        usados.add(j);
+      }
+      return { etiqueta: r.codigo, filaIdxs: porCodigo.get(r.codigo) ?? [], leafIdxs };
+    });
+    const libres = pdf.leaves.map((_, j) => j).filter((j) => !usados.has(j));
+    if (libres.length) out.push({ etiqueta: 'libre', filaIdxs: porCodigo.get('libre') ?? [], leafIdxs: libres });
+    return out;
+  }, [pdf, regiones, filasPdf]);
+
   const align = useMemo(() => {
     if (!pdf || filasPdf.length === 0) return null;
-    return alinear(
-      filasPdf.map((n) => ({
-        nombrePdf: n.fila.nombrePdf,
-        valor: n.fila.valor,
-        tipo: n.fila.tipo,
-        nombrePropuesto: n.nombre,
-      })),
-      pdf.leaves,
+    const alineables = filasPdf.map((n) => ({
+      nombrePdf: n.fila.nombrePdf,
+      valor: n.fila.valor,
+      tipo: n.fila.tipo,
+      nombrePropuesto: n.nombre,
+    }));
+    // Con regiones se alinea por segmentos; sin ellas, un solo pase global.
+    return segmentos.length > 0
+      ? alinearPorSegmentos(alineables, pdf.leaves, segmentos)
+      : alinear(alineables, pdf.leaves);
+  }, [pdf, filasPdf, segmentos]);
+
+  /** Mueve un borde de región a mano. Queda marcada como `manual` y no se pisa. */
+  const moverRegion = (i: number, campo: 'desdeLeaf' | 'hastaLeaf', valor: number) =>
+    setRegiones((prev) =>
+      prev.map((r, j) => {
+        if (j !== i) return r;
+        const next = { ...r, [campo]: valor, origen: 'manual' as const, detalle: 'borde ajustado a mano' };
+        // Un borde invertido no tiene sentido: se arrastra el otro.
+        if (next.desdeLeaf > next.hastaLeaf) {
+          if (campo === 'desdeLeaf') next.hastaLeaf = valor;
+          else next.desdeLeaf = valor;
+        }
+        return next;
+      }),
     );
-  }, [pdf, filasPdf]);
+
+  /** leafIdx -> código de instancia, para pintar las bandas y la tabla. */
+  const regionPorLeaf = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const s of segmentos) if (s.etiqueta !== 'libre') for (const j of s.leafIdxs) m.set(j, s.etiqueta);
+    return m;
+  }, [segmentos]);
 
   // Siembra las ediciones con lo que propuso la pre-alineación. Nunca pisa lo
   // que el usuario tocó a mano (`manual`).
+  //
+  // El estado se RECONSTRUYE en cada alineación en vez de acumularse: si no, un
+  // campo que la alineación anterior nombraba y la nueva ya no asigna se queda
+  // con el nombre viejo. Eso pasaba al llegar las regiones (el pase global
+  // sembraba 111 campos y el por regiones asigna 101) y producía colisiones
+  // fantasma con nombres de una alineación que ya no existe.
   useEffect(() => {
     if (!align || !pdf) return;
     setEdiciones((prev) => {
-      const next: Ediciones = { ...prev };
+      const next: Ediciones = {};
+      for (const [k, v] of Object.entries(prev)) if (v.manual) next[Number(k)] = v;
       for (const a of align.asignaciones) {
         const propuesto = filasPdf[a.filaIdx]?.nombre ?? '';
         a.leafIdx.forEach((li, parte) => {
@@ -359,6 +482,7 @@ export default function Etapa0Screen() {
     const g = etapa0Guardado;
     if (!g) return;
     if (g.hojaInstanciable) setHojaInstanciable(g.hojaInstanciable);
+    if (g.hojasBloque?.length) setHojasBloque(g.hojasBloque);
     if (g.instancias.length) setInstancias(g.instancias);
     setLimitarFuente(g.limitarFuente);
     setTamanoFuente(g.tamanoFuente);
@@ -370,7 +494,24 @@ export default function Etapa0Screen() {
     if (!pdf || hidratado.current.pdf) return;
     hidratado.current.pdf = true;
     const g = etapa0Guardado;
-    if (!g || !Object.keys(g.ediciones).length) return;
+    if (!g) return;
+    // Regiones guardadas a mano: se re-atan por nombre de campo.
+    const guardadasManual = (g.regiones ?? []).filter((r) => r.manual);
+    if (guardadasManual.length) {
+      const idxDe = new Map(pdf.leaves.map((l, i) => [l.name, i]));
+      setRegiones(
+        guardadasManual
+          .map((r) => ({
+            codigo: r.codigo,
+            desdeLeaf: idxDe.get(r.desdeNombre) ?? -1,
+            hastaLeaf: idxDe.get(r.hastaNombre) ?? -1,
+            origen: 'manual' as const,
+            detalle: 'borde ajustado a mano (restaurado del proyecto)',
+          }))
+          .filter((r) => r.desdeLeaf >= 0 && r.hastaLeaf >= 0),
+      );
+    }
+    if (!Object.keys(g.ediciones).length) return;
     const porClave = new Map(filasPdf.map((n, i) => [claveFila(n.fila.hoja, n.fila.fila, n.fila.instancia?.codigo), i]));
     setEdiciones((prev) => {
       const next: Ediciones = { ...prev };
@@ -407,7 +548,14 @@ export default function Etapa0Screen() {
       fichaNombre: fichaFile?.name,
       pdfNombre: pdfFile?.name,
       hojaInstanciable,
+      hojasBloque,
       instancias,
+      regiones: regiones.map((r) => ({
+        codigo: r.codigo,
+        desdeNombre: pdf?.leaves[r.desdeLeaf]?.name ?? '',
+        hastaNombre: pdf?.leaves[r.hastaLeaf]?.name ?? '',
+        manual: r.origen === 'manual',
+      })),
       ediciones: eds,
       limitarFuente,
       tamanoFuente,
@@ -416,7 +564,7 @@ export default function Etapa0Screen() {
       reporteDescargado: descargas.reporte,
     });
   }, [
-    ficha, pdf, fichaFile, pdfFile, hojaInstanciable, instancias, ediciones, filasPdf,
+    ficha, pdf, fichaFile, pdfFile, hojaInstanciable, hojasBloque, instancias, regiones, ediciones, filasPdf,
     limitarFuente, tamanoFuente, descargas, setEtapa0,
   ]);
 
@@ -486,6 +634,7 @@ export default function Etapa0Screen() {
                 />
               </>
             )}
+            {regiones.length > 0 && <Stat n={regiones.length} l="regiones" tone="text-brand-700" />}
             {align && (
               <>
                 <Stat n={`${align.stats.pctAlta}%`} l="confianza alta" tone="text-emerald-700" />
@@ -601,6 +750,77 @@ export default function Etapa0Screen() {
                 </div>
               ))}
             </div>
+
+            {/* Regiones: primer y último campo de cada instancia */}
+            {pdf && (
+              <div className="mt-2 pt-2 border-t border-slate-100" data-regiones>
+                <div className="text-[11px] font-medium text-slate-600 mb-1">
+                  Región de cada instancia en el PDF — la alineación corre <b>dentro</b> de la región y nunca cruza el
+                  límite. La siembra automática es orientativa: si algo quedó corrido, mové el primer o el último campo.
+                </div>
+                {regiones.length === 0 && (
+                  <p className="text-[11px] text-amber-700">
+                    No se pudo sembrar ninguna región: la alineación cae al pase global. Elegí el primer y último campo
+                    de cada instancia.
+                  </p>
+                )}
+                {regiones.map((r, i) => (
+                  <div key={r.codigo} className="flex flex-wrap items-center gap-1.5 text-[11px] mb-1">
+                    <span
+                      className="w-10 font-medium rounded px-1"
+                      style={{ background: colorRegion(i, 0.18), color: colorRegion(i, 1) }}
+                    >
+                      {r.codigo}
+                    </span>
+                    <span className="text-slate-400">desde</span>
+                    <select
+                      value={r.desdeLeaf}
+                      data-region-desde={r.codigo}
+                      onChange={(e) => moverRegion(i, 'desdeLeaf', Number(e.target.value))}
+                      className="rounded border border-slate-300 px-1 py-0.5 max-w-[220px]"
+                    >
+                      {pdf.leaves.map((l, j) => (
+                        <option key={j} value={j}>
+                          #{l.readingIndex} p{l.page + 1} · {l.name}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-slate-400">hasta</span>
+                    <select
+                      value={r.hastaLeaf}
+                      data-region-hasta={r.codigo}
+                      onChange={(e) => moverRegion(i, 'hastaLeaf', Number(e.target.value))}
+                      className="rounded border border-slate-300 px-1 py-0.5 max-w-[220px]"
+                    >
+                      {pdf.leaves.map((l, j) => (
+                        <option key={j} value={j}>
+                          #{l.readingIndex} p{l.page + 1} · {l.name}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-slate-500">
+                      {Math.max(0, r.hastaLeaf - r.desdeLeaf + 1)} campos ·{' '}
+                      {segmentos.find((x) => x.etiqueta === r.codigo)?.filaIdxs.length ?? 0} filas
+                    </span>
+                    <span className="text-slate-400" title={r.detalle}>
+                      {r.origen === 'manual' ? '(a mano)' : `(${r.origen})`}
+                    </span>
+                  </div>
+                ))}
+                {avisosRegion.length > 0 && (
+                  <details className="text-[11px] text-slate-500 mt-1">
+                    <summary className="cursor-pointer" data-avisos-regiones>
+                      {avisosRegion.length} aviso(s) de la siembra de regiones
+                    </summary>
+                    <ul className="list-disc pl-4 mt-0.5">
+                      {avisosRegion.map((a, i) => (
+                        <li key={i}>{a}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -819,6 +1039,8 @@ export default function Etapa0Screen() {
           <PdfPreview
             file={pdfFile}
             leaves={pdf?.leaves ?? []}
+            regiones={regiones}
+            regionPorLeaf={regionPorLeaf}
             selected={selected}
             onSelect={setSelected}
             confianza={confianzaPorLeaf}

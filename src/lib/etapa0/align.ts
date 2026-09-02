@@ -288,3 +288,91 @@ export function alinear(filas: FilaAlineable[], leaves: PdfLeaf[]): AlignResult 
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Alineación POR SEGMENTOS (Fix B de v1.4.1).
+//
+// Un pase global sobre 165 filas contra 111 campos deriva sin remedio. Con las
+// regiones, cada instancia alinea sus propias filas contra sus propios campos y
+// el límite no se cruza nunca: una fila sin campo en SU región queda huérfana en
+// vez de robarle el campo a la instancia siguiente.
+// ---------------------------------------------------------------------------
+
+export interface Segmento {
+  /** código de instancia, o 'libre' para los tramos fuera de toda región */
+  etiqueta: string;
+  /** índices GLOBALES de filas que pertenecen a este segmento */
+  filaIdxs: number[];
+  /** índices GLOBALES de campos del PDF que pertenecen a este segmento */
+  leafIdxs: number[];
+}
+
+export function alinearPorSegmentos(
+  filas: FilaAlineable[],
+  leaves: PdfLeaf[],
+  segmentos: Segmento[],
+): AlignResult {
+  const asignaciones: Asignacion[] = [];
+  const huerfanosFicha: number[] = [];
+  const huerfanosPdf: number[] = [];
+  const filasVistas = new Set<number>();
+  const leavesVistos = new Set<number>();
+
+  for (const seg of segmentos) {
+    for (const i of seg.filaIdxs) filasVistas.add(i);
+    for (const j of seg.leafIdxs) leavesVistos.add(j);
+    const subFilas = seg.filaIdxs.map((i) => filas[i]);
+    const subLeaves = seg.leafIdxs.map((j) => leaves[j]);
+    if (subFilas.length === 0) {
+      huerfanosPdf.push(...seg.leafIdxs);
+      continue;
+    }
+    if (subLeaves.length === 0) {
+      huerfanosFicha.push(...seg.filaIdxs);
+      continue;
+    }
+    const r = alinear(subFilas, subLeaves);
+    for (const a of r.asignaciones) {
+      asignaciones.push({
+        ...a,
+        filaIdx: seg.filaIdxs[a.filaIdx],
+        leafIdx: a.leafIdx.map((li) => seg.leafIdxs[li]),
+        motivos: [...a.motivos, `región «${seg.etiqueta}»`],
+      });
+    }
+    huerfanosFicha.push(...r.huerfanosFicha.map((i) => seg.filaIdxs[i]));
+    huerfanosPdf.push(...r.huerfanosPdf.map((j) => seg.leafIdxs[j]));
+  }
+
+  // Lo que no cayó en ningún segmento también es huérfano: no se fuerza nada.
+  filas.forEach((_, i) => {
+    if (!filasVistas.has(i)) huerfanosFicha.push(i);
+  });
+  leaves.forEach((_, j) => {
+    if (!leavesVistos.has(j)) huerfanosPdf.push(j);
+  });
+
+  asignaciones.sort((a, b) => a.leafIdx[0] - b.leafIdx[0]);
+  huerfanosFicha.sort((a, b) => a - b);
+  huerfanosPdf.sort((a, b) => a - b);
+
+  const alta = asignaciones.filter((a) => a.confianza === 'alta').length;
+  const media = asignaciones.filter((a) => a.confianza === 'media').length;
+  const revisar = asignaciones.filter((a) => a.confianza === 'revisar').length;
+
+  return {
+    asignaciones,
+    huerfanosFicha,
+    huerfanosPdf,
+    stats: {
+      filas: filas.length,
+      campos: leaves.length,
+      asignadas: asignaciones.length,
+      alta,
+      media,
+      revisar,
+      pctAlta: asignaciones.length ? Math.round((alta / asignaciones.length) * 100) : 0,
+      relaciones1aN: asignaciones.filter((a) => a.leafIdx.length > 1).length,
+    },
+  };
+}

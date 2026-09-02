@@ -9,7 +9,7 @@
 //     opciones (>=2 filas CONSECUTIVAS con el mismo valor en col D).
 // ---------------------------------------------------------------------------
 
-import type { FichaRow } from './fichaRaw';
+import type { FichaRow, RoutingEntry } from './fichaRaw';
 import { norm } from './fichaRaw';
 
 /** minúsculas, sin acentos, sin puntuación, espacios -> `_` */
@@ -68,30 +68,64 @@ export function instanciasPorDefecto(codigos: string[]): Instancia[] {
  * de un código. Devuelve una entrada por hoja.
  */
 export interface BloqueInstanciable {
+  /** hoja donde vive la fila `codigoTipo` */
   hoja: string;
+  /**
+   * TODAS las hojas del bloque repetible: la hoja raíz más sus hijas según el
+   * índice "Estructura base JSON". En el CSC `direccion` es
+   * `datosFormulario.personas.direccion`, o sea hija de `personas`: el PDF la
+   * repite una vez por instancia igual que el resto del bloque. Si se expandiera
+   * solo la hoja raíz, provincia/cantón/distrito existirían una sola vez contra
+   * tres bloques del PDF.
+   */
+  hojas: string[];
   filaCodigoTipo: number;
   codigos: string[];
 }
 
-export function detectarBloquesInstanciables(rows: FichaRow[]): BloqueInstanciable[] {
+/**
+ * Hojas hijas de `hoja` según el ruteo. El último segmento del path del índice
+ * es el nombre de la hoja (`datosFormulario.personas.direccion` -> `direccion`).
+ */
+export function hojasDelBloque(hoja: string, routing: RoutingEntry[], rows: FichaRow[]): string[] {
+  const existentes = new Set(rows.map((r) => r.hoja));
+  const ultimo = (path: string) => path.split('.').filter(Boolean).pop() ?? '';
+  const base = routing.find((r) => ultimo(r.nodo) === hoja)?.nodo;
+  if (!base) return [hoja];
+  const hijas = routing
+    .filter((r) => r.nodo !== base && r.nodo.startsWith(base + '.'))
+    .map((r) => ultimo(r.nodo))
+    .filter((h) => h && existentes.has(h));
+  // Se respeta el orden en que las hojas aparecen en la ficha.
+  const orden = [...new Set(rows.map((r) => r.hoja))];
+  return orden.filter((h) => h === hoja || hijas.includes(h));
+}
+
+export function detectarBloquesInstanciables(rows: FichaRow[], routing: RoutingEntry[] = []): BloqueInstanciable[] {
   const out: BloqueInstanciable[] = [];
   for (const r of rows) {
     const esCodigoTipo = norm(r.campoJson).endsWith('codigotipo');
     if (!esCodigoTipo) continue;
     const codigos = parseCodigosInstancia(r.valor);
-    if (codigos.length > 1) out.push({ hoja: r.hoja, filaCodigoTipo: r.fila, codigos });
+    if (codigos.length > 1) {
+      out.push({ hoja: r.hoja, hojas: hojasDelBloque(r.hoja, routing, rows), filaCodigoTipo: r.fila, codigos });
+    }
   }
   return out;
 }
 
-/** Clona las filas de la hoja instanciable, una vez por instancia activa. */
+/**
+ * Clona las filas del bloque repetible, una vez por instancia activa.
+ * `hojas` son TODAS las hojas del bloque (raíz + hijas), no solo la raíz.
+ */
 export function expandirInstancias(
   rows: FichaRow[],
-  hoja: string,
+  hojas: string | string[],
   instancias: Instancia[],
 ): FilaExpandida[] {
+  const set = new Set(Array.isArray(hojas) ? hojas : [hojas]);
   const activas = instancias.filter((i) => i.activa);
-  const delBloque = rows.filter((r) => r.hoja === hoja);
+  const delBloque = rows.filter((r) => set.has(r.hoja));
   if (activas.length === 0 || delBloque.length === 0) {
     return rows.map((r) => ({ ...r, instancia: null, indiceInstancia: null }));
   }
@@ -101,7 +135,7 @@ export function expandirInstancias(
   const out: FilaExpandida[] = [];
   let yaExpandido = false;
   for (const r of rows) {
-    if (r.hoja !== hoja) {
+    if (!set.has(r.hoja)) {
       out.push({ ...r, instancia: null, indiceInstancia: null });
       continue;
     }
@@ -124,8 +158,24 @@ export interface FilaExpandida extends FichaRow {
 // --- B.2 nombre propuesto ---------------------------------------------------
 
 /**
+ * Nombre base de una fila: es exactamente lo que usa `generarNombres`.
+ * Se centraliza acá porque la detección de grupos y la generación del nombre
+ * TIENEN que usar la misma clave, si no aparecen colisiones sin sufijo.
+ */
+export function baseDeFila(r: { nombrePdf: string; label: string }): string {
+  return norm(r.nombrePdf || r.label);
+}
+
+/**
  * Marca qué filas pertenecen a un grupo de opciones: >=2 filas CONSECUTIVAS
- * (misma hoja) con el mismo valor en col D.
+ * (misma hoja, misma instancia) que comparten el NOMBRE BASE.
+ *
+ * Antes se agrupaba por col D, y eso dejaba grupos sin detectar: en el CSC las
+ * filas `direccion-5` y `direccion-6` comparten col C ("Domicilio") pero tienen
+ * col D distinta ("Nacional" / "Extranjero"), así que no se agrupaban, ninguna
+ * recibía el sufijo de col F y las dos terminaban llamándose `domicilio`.
+ * Agrupar por el nombre base es la regla correcta: el sufijo existe justamente
+ * para desambiguar las filas que si no chocarían.
  */
 export function marcarGruposDeOpciones(rows: FilaExpandida[]): boolean[] {
   const esGrupo = new Array(rows.length).fill(false);
@@ -136,8 +186,8 @@ export function marcarGruposDeOpciones(rows: FilaExpandida[]): boolean[] {
       j + 1 < rows.length &&
       rows[j + 1].hoja === rows[i].hoja &&
       rows[j + 1].instancia?.codigo === rows[i].instancia?.codigo &&
-      !!rows[i].label &&
-      norm(rows[j + 1].label) === norm(rows[i].label)
+      !!baseDeFila(rows[i]) &&
+      baseDeFila(rows[j + 1]) === baseDeFila(rows[i])
     ) {
       j++;
     }
@@ -169,7 +219,7 @@ export function generarNombres(rows: FilaExpandida[]): NombrePropuesto[] {
       return { fila, nombre: '', colision: false, partes: { prefijo: '', base: '', sufijo: '' } };
     }
     const prefijo = fila.instancia?.prefijo ? slug(fila.instancia.prefijo) : '';
-    const base = slug(fila.nombrePdf || fila.label);
+    const base = slug(baseDeFila(fila));
     const sufijo = esGrupo[i] && fila.valor ? slug(fila.valor) : '';
     const nombre = [prefijo, base, sufijo].filter(Boolean).join('_');
     return { fila, nombre, colision: false, partes: { prefijo, base, sufijo } };

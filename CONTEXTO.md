@@ -195,7 +195,7 @@ Cada ítem que falla es **clickeable** y selecciona el campo.
 - **Proyecto** (.json) para guardar/cargar todo el estado, e **Importar JSON** de un
   form-definition existente (preserva `_sourcePdf`, ids y `sourceMeta`).
 
-### 5.8 Etapa 0 — Renombrado asistido (v1.0.0 → v1.5.0)
+### 5.8 Etapa 0 — Renombrado asistido (v1.0.0 → v1.5.0, + v1.4.1)
 
 La ficha cruda del INS viene con la **col N vacía** y los AcroNames del PDF **mienten**
 (en el CSC `Profesión` es en realidad el Detalle del domicilio extranjero). Etapa 0 toma
@@ -206,10 +206,11 @@ Módulos (`src/lib/etapa0/`):
 
 | archivo | qué hace |
 |---|---|
-| `fichaRaw.ts` | aplana las 13 hojas, detecta el header de 14 columnas y las **4 exclusiones**. Un marcador `NO APLICA` real cumple **3 condiciones** (`NO APLICA` + (`HOJA`\|`SECCION`) + `FORMULARIO`); nunca se escanean J ni N (usan “No aplica” como enum) y el marcador de bloque solo vale en col G. Precedencia: **contrato JSON primero** (`A === 'JSON'`), después hoja, bloque, sin-campo-pdf. Cada fila lleva `motivo` y `hojaAplica`. |
+| `fichaRaw.ts` | aplana las 13 hojas, detecta el header de 14 columnas y las **4 exclusiones**, más las **filas-nota** (col C con prosa descriptiva en vez de un nombre de campo). La señal de fila-nota es **estructural** —sin label (D), sin tipo (E), sin path JSON (M)— y se puntúa: el largo del texto es una señal débil a propósito, porque en el CSC las preguntas PEP tienen 16-23 palabras y son campos reales mientras «Dentro de datosFormulario» tiene 3 y es nota. Un marcador `NO APLICA` real cumple **3 condiciones** (`NO APLICA` + (`HOJA`\|`SECCION`) + `FORMULARIO`); nunca se escanean J ni N (usan “No aplica” como enum) y el marcador de bloque solo vale en col G. Precedencia: **contrato JSON primero** (`A === 'JSON'`), después hoja, bloque, sin-campo-pdf. Cada fila lleva `motivo` y `hojaAplica`. |
 | `pdfFields.ts` | walk **crudo** del AcroForm (no la API de alto nivel de pdf-lib). Orden de lectura `(page, -Y, X)`. Un nodo con kids sin `/T` es **un** campo con N widgets. Marca `multiWidgetSospechoso` (`/Tx` con >1 widget = colisión del PDF original). |
-| `acroName.ts` | instancias del bloque repetible (ASG/PJR/RPL, expansión **instancia-mayor**), grupos de opciones por col D consecutiva, y el nombre propuesto `prefijo + slug(C) + [slug(F)]`. Las colisiones **se marcan, no se desambiguan con contador ciego**. |
-| `align.ts` | Needleman-Wunsch con huecos tolerados. La señal confiable es la **posición**; el texto del AcroName solo **suma** (`BOOST_TEXTO`), nunca resta. El 1:N (fecha partida en día/mes/año) se modela **dentro del DP**, no en un post-paso. |
+| `acroName.ts` | instancias del bloque repetible (ASG/PJR/RPL, expansión **instancia-mayor**) y el nombre propuesto `prefijo + slug(C) + [slug(F)]`. El bloque repetible incluye sus **hojas hijas** según el índice (`datosFormulario.personas.direccion` es hija de `personas`, o sea el PDF la repite por instancia). Los grupos de opciones se detectan por **nombre base consecutivo** —la misma clave con la que se genera el nombre—, no por col D. Las colisiones **se marcan, no se desambiguan con contador ciego**. |
+| `align.ts` | Needleman-Wunsch con huecos tolerados. La señal confiable es la **posición**; el texto del AcroName solo **suma** (`BOOST_TEXTO`), nunca resta. El 1:N (fecha partida en día/mes/año) se modela **dentro del DP**, no en un post-paso. `alinearPorSegmentos` corre ese mismo algoritmo **por región** y nunca cruza el límite: una fila sin campo en su región queda huérfana en vez de robarle el campo a otra instancia. |
+| `regiones.ts` | Cada instancia ocupa una **región** del PDF (rango contiguo del orden de lectura). Se siembra en dos pasos: (1) los **grupos de opciones** del bloque repetible se buscan en el texto del PDF y un grupo que aparece tantas veces como instancias ancla la banda *k* a la instancia *k*; (2) el borde exacto sale del **mayor salto vertical** entre campos consecutivos de la zona ambigua (en el CSC 27pt contra 20-21pt internos: cae en y=339). El cambio de página es un salto infinito. La siembra es orientativa: el usuario corrige `desdeLeaf`/`hastaLeaf` con dos selects por instancia y las regiones se pintan como bandas de color en el preview. |
 | `writePdf.ts` | escribe el PDF renombrado sobre el dict crudo: aplana `/AcroForm/Fields` (Signframe necesita nombres planos), baja los heredables (`FT`, `Ff`, `DA`, `Q`, `MaxLen`, `Opt`) antes de desenganchar el `/Parent`, limpia `/V` `/DV` `/TU` `/TM` `/RV`, pone `/AS /Off` en los `/Btn`, topea el tamaño de fuente del `/DA` (default 10pt) y setea `/NeedAppearances`. **Los renombrados circulares no necesitan nombre intermedio**: el renombre se aplica sobre la identidad del objeto, no sobre una tabla por nombre. |
 | `writeFicha.ts` | reescribe el mismo `.xlsx` completando **solo la col N** de las filas que van al PDF (solo-JSON y excluidas quedan vacías). Además `detectarAvisosColM`: erratas de tipeo **genéricas** (grafía inconsistente, no-ASCII, mayúscula inicial, espacios, punto doble) — **se reportan, no se corrigen**. |
 | `reporte.ts` | CSV con asignados, huérfanos de los dos lados, colisiones, avisos de col M y la nota de ausencia de `/Sig`. |
@@ -280,10 +281,13 @@ app puede **re-importar** el resultado para revisión visual final.
 
 ## 9. Próximos pasos abiertos
 
-0. **Fixtures reales de Etapa 0**: falta adjuntar
-   `Ficha_de_configuración_-_Conozca_a_su_cliente.xlsx` y
-   `BUC_Formulario_Conozca_Cliente_Homologado.pdf` en `fixtures/` (gitignoreada) para
-   levantar los 3 bloques de asserts que hoy quedan en `(SKIP)`.
+0. **Etapa 0 Fix C** (pendiente de v1.4.1): grupos de opciones **partidos entre
+   regiones**. En el CSC «Tipo de Identificación» son 8 opciones en la ficha pero el PDF
+   las reparte 5 (física: ASG y RPL) y 4 (jurídica: PJR). Hay que topear el grupo a los
+   `/Btn` disponibles en su región, ofrecer el sobrante a la región siguiente si hay un
+   grupo del mismo label sin cubrir, y matchear dentro del grupo por `slug(F)` contra el
+   texto cercano al widget. La evidencia ya está medida: las tres bandas están en p1
+   y=578, p1 y=278 y p2 y=712.
 1. **`SKILL.md` / `CLAUDE.md`** para la última milla híbrida (tomar el esqueleto
    validado + la ficha y generar `autoFillConcat`, repeaters, enfermedades,
    `excludeFromJson`).
