@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
@@ -44,6 +45,7 @@ import { construirReporte } from '../../lib/etapa0/reporte';
 import { downloadCsv } from '../../lib/matrixOut';
 import { slugify } from '../../lib/exporter';
 import TablaCampos, { nombreEfectivo, type Ediciones } from './TablaCampos';
+import ModoRevision from './ModoRevision';
 import PdfPreview from './PdfPreview';
 
 /** Clave estable de una fila de ficha (sobrevive a reordenamientos). */
@@ -126,6 +128,11 @@ export default function Etapa0Screen() {
   const [descargas, setDescargas] = useState({ pdf: false, ficha: false, reporte: false });
   const [trabajando, setTrabajando] = useState<string | null>(null);
   const [avisoEscritura, setAvisoEscritura] = useState<string | null>(null);
+  const [detalleAbierto, setDetalleAbierto] = useState(false);
+  const [modoRevision, setModoRevision] = useState(false);
+  const [revIdx, setRevIdx] = useState(0);
+  /** nombres ACTUALES de campos que el usuario confirmó a mano en la revisión */
+  const [confirmados, setConfirmados] = useState<Set<string>>(new Set());
 
   const onFicha = async () => {
     const f = fichaInput.current?.files?.[0];
@@ -309,6 +316,7 @@ export default function Etapa0Screen() {
 
   const totalAnclas = useMemo(() => segmentos.reduce((n, s2) => n + (s2.anclas?.length ?? 0), 0), [segmentos]);
 
+
   /** leafIdx -> código de instancia, para pintar las bandas y la tabla. */
   const regionPorLeaf = useMemo(() => {
     const m = new Map<number, string>();
@@ -381,6 +389,81 @@ export default function Etapa0Screen() {
     align?.asignaciones.forEach((a) => m.set(a.filaIdx, a));
     return m;
   }, [align]);
+
+  /** leafIdx -> motivos de la asignación, para explicarlos en la revisión. */
+  const motivosPorLeaf = useMemo(() => {
+    const m = new Map<number, string[]>();
+    align?.asignaciones.forEach((a) => a.leafIdx.forEach((li) => m.set(li, a.motivos)));
+    return m;
+  }, [align]);
+
+  /**
+   * Campos que necesitan atención: confianza media/revisar, o sin asignar.
+   * Un campo confirmado a mano sale de la lista (pero no cambia su confianza:
+   * la confirmación es estado de UI, no una re-clasificación).
+   */
+  const pendientes = useMemo(() => {
+    if (!pdf) return [];
+    return pdf.leaves
+      .map((l, i) => ({ l, i }))
+      .filter(({ l }) => {
+        if (confirmados.has(l.name)) return false;
+        const c = confianzaPorLeaf.get(l.name);
+        return c === undefined || c === 'media' || c === 'revisar';
+      })
+      .map(({ i }) => i);
+  }, [pdf, confianzaPorLeaf, confirmados]);
+
+  const resueltos = (pdf?.leaves.length ?? 0) - pendientes.length;
+
+  /** Regiones que quedaron sin sembrar o vacías: eso sí exige intervenir. */
+  const regionesProblema = useMemo(() => {
+    if (!pdf || activas.length === 0) return [] as string[];
+    const out: string[] = [];
+    for (const inst of activas) {
+      const r = regiones.find((x) => x.codigo === inst.codigo);
+      if (!r) out.push(`${inst.codigo}: sin región asignada`);
+      else {
+        const n = (segmentos.find((sg) => sg.etiqueta === inst.codigo)?.leafIdxs.length ?? 0);
+        if (n === 0) out.push(`${inst.codigo}: región con 0 campos`);
+      }
+    }
+    return out;
+  }, [pdf, activas, regiones, segmentos]);
+
+  /**
+   * Filas de ficha sin campo, partidas en dos. Las del bloque repetible que no
+   * aplican a su instancia NO son un problema: son el subset por geometría
+   * funcionando. En el CSC son 70 de 71, y llamarlas «huérfanas» asustaba sin
+   * motivo. Ninguna fila `solo-json` ni `excluida` entra acá: la alineación
+   * corre únicamente sobre las filas clasificadas como `pdf`.
+   */
+  const huerfanosFichaPartidos = useMemo(() => {
+    const noAplican: number[] = [];
+    const sinCampo: number[] = [];
+    for (const i of align?.huerfanosFicha ?? []) {
+      const np = filasPdf[i];
+      if (!np) continue;
+      if (np.fila.instancia && hojasBloque.includes(np.fila.hoja)) noAplican.push(i);
+      else sinCampo.push(i);
+    }
+    return { noAplican, sinCampo };
+  }, [align, filasPdf, hojasBloque]);
+
+  /**
+   * Confirmar saca el campo de la lista de pendientes, así que quedarse en el
+   * MISMO índice ya es avanzar al siguiente. Incrementarlo además salteaba uno.
+   */
+  const confirmar = (leafName: string) => {
+    setConfirmados((prev) => new Set(prev).add(leafName));
+  };
+
+  // Al entrar en revisión, el foco arranca en el primer pendiente.
+  useEffect(() => {
+    if (!modoRevision || !pdf) return;
+    const i = pendientes[Math.min(revIdx, Math.max(0, pendientes.length - 1))];
+    if (i != null) setSelected(pdf.leaves[i].name);
+  }, [modoRevision, revIdx, pendientes, pdf]);
 
   /** leafIdx -> asignación de la pre-alineación (para el reporte). */
   const asigPorLeaf = useMemo(() => {
@@ -513,6 +596,8 @@ export default function Etapa0Screen() {
     if (g.instancias.length) setInstancias(g.instancias);
     setLimitarFuente(g.limitarFuente);
     setTamanoFuente(g.tamanoFuente);
+    if (g.detalleAbierto != null) setDetalleAbierto(g.detalleAbierto);
+    if (g.confirmados?.length) setConfirmados(new Set(g.confirmados));
   }, [ficha, etapa0Guardado]);
 
   // Hidratar ediciones cuando entra el PDF (se re-atan por nombre y por clave
@@ -589,10 +674,12 @@ export default function Etapa0Screen() {
       pdfDescargado: descargas.pdf,
       fichaDescargada: descargas.ficha,
       reporteDescargado: descargas.reporte,
+      detalleAbierto,
+      confirmados: [...confirmados],
     });
   }, [
     ficha, pdf, fichaFile, pdfFile, hojaInstanciable, hojasBloque, instancias, regiones, ediciones, filasPdf,
-    limitarFuente, tamanoFuente, descargas, setEtapa0,
+    limitarFuente, tamanoFuente, descargas, detalleAbierto, confirmados, setEtapa0,
   ]);
 
   const filasFicha = useMemo(() => {
@@ -611,6 +698,32 @@ export default function Etapa0Screen() {
   }, [nombres, filtro, q]);
 
 
+  const nDescargas = (descargas.pdf ? 1 : 0) + (descargas.ficha ? 1 : 0) + (descargas.reporte ? 1 : 0);
+  const botonesDescarga = (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Button
+        onClick={doDescargarPdf}
+        disabled={colisionesPdf.size > 0 || trabajando !== null}
+        title={
+          colisionesPdf.size > 0
+            ? `Bloqueado por ${colisionesPdf.size} colisión(es) de nombre: ` +
+              [...colisionesPdf].slice(0, 5).join(' · ') +
+              (colisionesPdf.size > 5 ? ' …' : '')
+            : 'Escribe el PDF con los nombres nuevos'
+        }
+        data-dl="pdf"
+      >
+        <Download size={14} /> {trabajando === 'pdf' ? 'Escribiendo…' : 'PDF renombrado'}
+      </Button>
+      <Button onClick={doDescargarFicha} disabled={!fichaFile || trabajando !== null} data-dl="ficha">
+        <FileSpreadsheet size={14} /> {trabajando === 'ficha' ? 'Escribiendo…' : 'Ficha col N'}
+      </Button>
+      <Button onClick={doDescargarReporte} disabled={trabajando !== null} data-dl="reporte">
+        <FileText size={14} /> Reporte CSV
+      </Button>
+    </div>
+  );
+
   return (
     <div className="h-screen flex flex-col bg-slate-100">
       {/* Barra */}
@@ -621,7 +734,7 @@ export default function Etapa0Screen() {
         <span className="font-bold text-slate-800 flex items-center gap-1.5">
           <FileSignature size={16} /> Etapa 0 · Renombrado asistido
         </span>
-        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.5.0 · escritura y hand-off</span>
+        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.4.2 · pantalla</span>
         <div className="flex-1" />
         <input ref={fichaInput} type="file" accept=".xlsx,.xls" hidden onChange={onFicha} />
         <input ref={pdfInput} type="file" accept="application/pdf,.pdf" hidden onChange={onPdf} />
@@ -633,433 +746,554 @@ export default function Etapa0Screen() {
         </Button>
       </header>
 
-      <div className="px-3 py-2 shrink-0">
-        <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-          <b>Importante:</b> el renombrado va <b>siempre antes</b> de cargar el PDF en Signframe. Si lo cargás primero,
-          el <code>sourceMeta</code> queda clavado a los nombres genéricos del AcroForm.
-        </div>
-        {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+      <div className="flex-1 min-h-0 flex gap-2 p-3">
+        {/* Columna izquierda */}
+        <div className="w-1/2 min-w-0 flex flex-col gap-2 overflow-auto scroll-thin">
+          {error && (
+            <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>
+          )}
 
-        {(ficha || pdf) && (
-          <div className="grid grid-cols-4 md:grid-cols-8 gap-2 mt-2">
-            {ficha && (
-              <>
-                <Stat n={ficha.stats.filasDatos} l="filas ficha" />
-                <Stat n={ficha.stats.pdf} l="van al PDF" tone="text-emerald-700" />
-                <Stat n={ficha.stats.soloJson} l="solo JSON" />
-                <Stat n={ficha.stats.excluidas} l="excluidas" tone="text-red-600" />
-                <Stat
-                  n={ficha.stats.filasNota}
-                  l="filas-nota"
-                  tone={ficha.stats.filasNota ? 'text-amber-600' : 'text-slate-700'}
-                />
-                <Stat n={ficha.stats.filasMarcadorHoja} l="marcador hoja" />
-                <Stat
-                  n={Object.keys(colisiones).length}
-                  l="colisiones"
-                  tone={Object.keys(colisiones).length ? 'text-red-600' : 'text-slate-700'}
-                />
-              </>
-            )}
-            {regiones.length > 0 && <Stat n={regiones.length} l="regiones" tone="text-brand-700" />}
-            {totalAnclas > 0 && <Stat n={totalAnclas} l="anclas por texto" tone="text-brand-700" />}
-            {align && (
-              <>
-                <Stat n={`${align.stats.pctAlta}%`} l="confianza alta" tone="text-emerald-700" />
-                <Stat n={align.stats.media} l="media" tone="text-amber-600" />
-                <Stat n={align.stats.revisar} l="revisar" tone="text-red-600" />
-                <Stat n={align.stats.relaciones1aN} l="1:N" />
-              </>
-            )}
-            {pdf && (
-              <>
-                <Stat n={pdf.leaves.length} l="campos PDF" tone="text-brand-700" />
-                <Stat n={pdf.totalWidgets} l="widgets" />
-                <Stat n={pdf.pageCount} l="páginas" />
-                <Stat
-                  n={pdf.sospechosos.length}
-                  l="multi-widget /Tx"
-                  tone={pdf.sospechosos.length ? 'text-amber-600' : 'text-slate-700'}
-                />
-              </>
-            )}
-          </div>
-        )}
-
-        {pdf && pdf.sospechosos.length > 0 && (
-          <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-            <b>{pdf.sospechosos.length} campo(s) /Tx con varios widgets</b> — un /Btn multi-widget es normal (grupo de
-            radios), pero un /Tx no: suele ser una colisión del PDF original. Clickeá uno para resaltar todos sus
-            widgets.{' '}
-            {pdf.sospechosos.map((l) => (
-              <button
-                key={l.name}
-                onClick={() => setSelected(l.name)}
-                className="underline decoration-dotted mr-2"
-                title={`páginas ${l.paginas.map((x) => x + 1).join(', ')}`}
-              >
-                {l.name} ×{l.widgets.length} [p{l.paginas.map((x) => x + 1).join(',')}]
-              </button>
-            ))}
-          </div>
-        )}
-        {align && (align.huerfanosFicha.length > 0 || align.huerfanosPdf.length > 0) && (
-          <div className="mt-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-[11px] text-slate-600">
-            <b>Huérfanos</b> — {align.huerfanosFicha.length} fila(s) de ficha sin campo PDF ·{' '}
-            {align.huerfanosPdf.length} campo(s) PDF sin fila.{' '}
-            {align.huerfanosPdf.length > 0 && (
-              <span className="text-slate-400">
-                ({align.huerfanosPdf.slice(0, 8).map((i) => pdf!.leaves[i].name).join(', ')}
-                {align.huerfanosPdf.length > 8 ? '…' : ''})
-              </span>
-            )}
-          </div>
-        )}
-        {colisionesPdf.size > 0 && (
-          <div className="mt-2 rounded-md border border-red-400 bg-red-50 px-3 py-2 text-[11px] text-red-700">
-            <b>{colisionesPdf.size} colisión(es) de nombre en el PDF</b> — bloquean la descarga del PDF renombrado hasta
-            resolverlas: {[...colisionesPdf].slice(0, 10).join(' · ')}
-            {colisionesPdf.size > 10 ? '…' : ''}
-          </div>
-        )}
-        {Object.keys(colisiones).length > 0 && (
-          <div className="mt-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-[11px] text-red-700">
-            <b>Colisiones entre nombres propuestos</b> (se marcan, no se desambiguan solas):{' '}
-            {Object.entries(colisiones).map(([n, c]) => `${n} ×${c}`).join(' · ')}
-          </div>
-        )}
-        {ficha && ficha.filasIgnoradas.length > 0 && (
-          <div className="mt-2 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-[11px] text-slate-600">
-            <b>{ficha.filasIgnoradas.length} fila(s) con contenido no contadas:</b>{' '}
-            {ficha.filasIgnoradas.map((f) => `${f.hoja} R${f.fila}`).join(', ')}
-          </div>
-        )}
-      </div>
-
-      {/* Instancias */}
-      {hojaInstanciable && instancias.length > 0 && (
-        <div className="px-3 pb-2 shrink-0">
-          <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
-            <div className="text-[11px] font-medium text-slate-600 mb-1">
-              Instancias del bloque <code>{hojaInstanciable}</code> — el PDF lo repite una vez por instancia.
-              Los índices son decisión tuya.
-            </div>
-            <div className="flex flex-wrap gap-3">
-              {instancias.map((inst, i) => (
-                <div key={inst.codigo} className="flex items-center gap-1.5 text-[11px]">
-                  <input
-                    type="checkbox"
-                    checked={inst.activa}
-                    onChange={(e) =>
-                      setInstancias((prev) => prev.map((x, j) => (j === i ? { ...x, activa: e.target.checked } : x)))
-                    }
-                  />
-                  <span className="font-medium text-slate-700 w-10">{inst.codigo}</span>
-                  <label className="text-slate-400">prefijo</label>
-                  <input
-                    value={inst.prefijo}
-                    onChange={(e) =>
-                      setInstancias((prev) => prev.map((x, j) => (j === i ? { ...x, prefijo: e.target.value } : x)))
-                    }
-                    className="w-20 rounded border border-slate-300 px-1 py-0.5 font-mono"
-                  />
-                  <label className="text-slate-400">personas[</label>
-                  <input
-                    type="number"
-                    value={inst.indice}
-                    onChange={(e) =>
-                      setInstancias((prev) =>
-                        prev.map((x, j) => (j === i ? { ...x, indice: Number(e.target.value) } : x)),
-                      )
-                    }
-                    className="w-12 rounded border border-slate-300 px-1 py-0.5"
-                  />
-                  <span className="text-slate-400">]</span>
-                </div>
-              ))}
-            </div>
-
-            {/* Regiones: primer y último campo de cada instancia */}
-            {pdf && (
-              <div className="mt-2 pt-2 border-t border-slate-100" data-regiones>
-                <div className="text-[11px] font-medium text-slate-600 mb-1">
-                  Región de cada instancia en el PDF — la alineación corre <b>dentro</b> de la región y nunca cruza el
-                  límite. La siembra automática es orientativa: si algo quedó corrido, mové el primer o el último campo.
-                </div>
-                {regiones.length === 0 && (
-                  <p className="text-[11px] text-amber-700">
-                    No se pudo sembrar ninguna región: la alineación cae al pase global. Elegí el primer y último campo
-                    de cada instancia.
-                  </p>
-                )}
-                {regiones.map((r, i) => (
-                  <div key={r.codigo} className="flex flex-wrap items-center gap-1.5 text-[11px] mb-1">
-                    <span
-                      className="w-10 font-medium rounded px-1"
-                      style={{ background: colorRegion(i, 0.18), color: colorRegion(i, 1) }}
-                    >
-                      {r.codigo}
-                    </span>
-                    <span className="text-slate-400">desde</span>
-                    <select
-                      value={r.desdeLeaf}
-                      data-region-desde={r.codigo}
-                      onChange={(e) => moverRegion(i, 'desdeLeaf', Number(e.target.value))}
-                      className="rounded border border-slate-300 px-1 py-0.5 max-w-[220px]"
-                    >
-                      {pdf.leaves.map((l, j) => (
-                        <option key={j} value={j}>
-                          #{l.readingIndex} p{l.page + 1} · {l.name}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="text-slate-400">hasta</span>
-                    <select
-                      value={r.hastaLeaf}
-                      data-region-hasta={r.codigo}
-                      onChange={(e) => moverRegion(i, 'hastaLeaf', Number(e.target.value))}
-                      className="rounded border border-slate-300 px-1 py-0.5 max-w-[220px]"
-                    >
-                      {pdf.leaves.map((l, j) => (
-                        <option key={j} value={j}>
-                          #{l.readingIndex} p{l.page + 1} · {l.name}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="text-slate-500">
-                      {Math.max(0, r.hastaLeaf - r.desdeLeaf + 1)} campos ·{' '}
-                      {segmentos.find((x) => x.etiqueta === r.codigo)?.filaIdxs.length ?? 0} filas
-                    </span>
-                    <span className="text-slate-400" title={r.detalle}>
-                      {r.origen === 'manual' ? '(a mano)' : `(${r.origen})`}
-                    </span>
-                  </div>
-                ))}
-                {avisosRegion.length > 0 && (
-                  <details className="text-[11px] text-slate-500 mt-1">
-                    <summary className="cursor-pointer" data-avisos-regiones>
-                      {avisosRegion.length} aviso(s) de la siembra de regiones
-                    </summary>
-                    <ul className="list-disc pl-4 mt-0.5">
-                      {avisosRegion.map((a, i) => (
-                        <li key={i}>{a}</li>
-                      ))}
-                    </ul>
-                  </details>
-                )}
+          {/* Antes de tener los dos archivos: la advertencia de orden es lo único
+              accionable, así que ocupa la pantalla. */}
+          {!(ficha && pdf) && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+              <b>Importante:</b> el renombrado va <b>siempre antes</b> de cargar el PDF en Signframe. Si lo cargás
+              primero, el <code>sourceMeta</code> queda clavado a los nombres genéricos del AcroForm.
+              <div className="mt-1.5 text-amber-900">
+                Cargá la <b>ficha cruda (.xlsx)</b> y el <b>PDF crudo</b> con los botones de arriba.
               </div>
-            )}
-          </div>
-        </div>
-      )}
+            </div>
+          )}
 
-      {/* Hand-off: escribir y pasar a Etapa 1 */}
-      {ficha && pdf && (
-        <div className="px-3 pb-2 shrink-0">
-          <div className="rounded-md border border-slate-200 bg-white px-3 py-2" data-handoff>
-            <div className="flex flex-wrap items-start gap-4">
-              <ol className="text-[11px] space-y-0.5 min-w-[280px]">
-                <Paso ok={!!ficha && !!pdf} n={1}>
-                  Cargar la ficha cruda y el PDF crudo
+          {ficha && pdf && modoRevision && (
+            <ModoRevision
+              leaves={pdf.leaves}
+              filasPdf={filasPdf}
+              pendientes={pendientes}
+              idx={Math.min(revIdx, Math.max(0, pendientes.length - 1))}
+              setIdx={setRevIdx}
+              ediciones={ediciones}
+              setEdiciones={setEdiciones}
+              confianzaPorLeaf={confianzaPorLeaf}
+              motivosPorLeaf={motivosPorLeaf}
+              colisiones={colisionesPdf}
+              confirmados={confirmados}
+              onConfirmar={confirmar}
+              onSalir={() => setModoRevision(false)}
+            />
+          )}
+
+          {/* --- RESUMEN: el estado en tres líneas, no el razonamiento --- */}
+          {ficha && pdf && !modoRevision && (
+            <div className="rounded-md border border-slate-200 bg-white px-3 py-3" data-resumen>
+              {colisionesPdf.size > 0 && (
+                <div className="mb-2 flex items-start gap-2 rounded-md border border-red-400 bg-red-50 px-2 py-1.5 text-xs text-red-700">
+                  <AlertTriangle size={15} className="mt-[1px] shrink-0" />
+                  <span data-linea-colisiones>
+                    <b>{colisionesPdf.size} colisión(es) de nombre</b> — bloquean la descarga del PDF hasta resolverlas:{' '}
+                    {[...colisionesPdf].slice(0, 6).join(' · ')}
+                    {colisionesPdf.size > 6 ? ' …' : ''}
+                  </span>
+                </div>
+              )}
+
+              {regionesProblema.length > 0 && (
+                <div className="mb-2 flex items-start gap-2 rounded-md border border-amber-400 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
+                  <AlertTriangle size={15} className="mt-[1px] shrink-0" />
+                  <span data-linea-regiones>
+                    <b>Hay regiones sin resolver</b> ({regionesProblema.join(' · ')}). Abrí <b>Ver detalle</b> y elegí
+                    el primer y último campo de cada instancia.
+                  </span>
+                </div>
+              )}
+
+              <ul className="space-y-1.5 text-sm">
+                <li className="flex items-center gap-2" data-linea-resueltos>
+                  <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                  <b className="text-slate-800">{resueltos}</b>
+                  <span className="text-slate-600">campos resueltos</span>
+                </li>
+                <li className="flex items-center gap-2" data-linea-pendientes>
+                  {pendientes.length > 0 ? (
+                    <AlertTriangle size={16} className="text-amber-500 shrink-0" />
+                  ) : (
+                    <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                  )}
+                  <b className="text-slate-800">{pendientes.length}</b>
+                  <span className="text-slate-600">necesitan tu revisión</span>
+                  {pendientes.length > 0 && (
+                    <button
+                      onClick={() => {
+                        setRevIdx(0);
+                        setModoRevision(true);
+                      }}
+                      data-revisar
+                      className="ml-auto inline-flex items-center gap-1 rounded-md bg-brand-600 px-3 py-1 text-xs text-white hover:bg-brand-700"
+                    >
+                      Revisar <ArrowRight size={13} />
+                    </button>
+                  )}
+                </li>
+                <li className="flex items-center gap-2">
+                  {colisionesPdf.size === 0 ? (
+                    <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertTriangle size={16} className="text-red-500 shrink-0" />
+                  )}
+                  <b className="text-slate-800">{colisionesPdf.size}</b>
+                  <span className="text-slate-600">colisiones</span>
+                </li>
+              </ul>
+
+              <div className="mt-3 pt-2 border-t border-slate-100">{botonesDescarga}</div>
+              <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-500">
+                <input type="checkbox" checked={limitarFuente} onChange={(e) => setLimitarFuente(e.target.checked)} />
+                Topear el tamaño de fuente en
+                <input
+                  type="number"
+                  min={4}
+                  max={24}
+                  value={tamanoFuente}
+                  onChange={(e) => setTamanoFuente(Number(e.target.value) || 10)}
+                  disabled={!limitarFuente}
+                  className="w-12 rounded border border-slate-300 px-1 py-0.5 disabled:opacity-40"
+                />
+                pt
+              </label>
+              {avisoEscritura && <p className="mt-1.5 text-[11px] text-emerald-700">{avisoEscritura}</p>}
+            </div>
+          )}
+
+          {/* --- HAND-OFF: aparece recién al descargar el PDF --- */}
+          {ficha && pdf && !modoRevision && descargas.pdf && (
+            <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2.5 text-xs" data-handoff>
+              <p className="flex items-center gap-1.5 font-medium text-emerald-800">
+                <CheckCircle2 size={15} /> PDF renombrado descargado
+              </p>
+              <p className="mt-2 text-slate-600">Ahora:</p>
+              <ol className="mt-0.5 space-y-1 text-slate-700">
+                <Paso ok n={1}>
+                  Descargar el <b>PDF renombrado</b>
                 </Paso>
-                <Paso ok={colisionesPdf.size === 0} n={2}>
-                  Resolver colisiones y revisar los <b>media</b> / <b>revisar</b>
+                <Paso ok={false} n={2}>
+                  Subí <b>ESTE</b> PDF a Signframe (no el original)
                 </Paso>
-                <Paso ok={descargas.pdf} n={3}>
-                  Descargar el <b>PDF renombrado</b> — y recién ahí subirlo a Signframe
+                <Paso ok={false} n={3}>
+                  Descargá el <b>JSON main</b> que genera
                 </Paso>
                 <Paso ok={descargas.ficha && descargas.reporte} n={4}>
-                  Descargar la <b>ficha con la col N</b> y el <b>reporte</b>
+                  Volvé acá con la <b>ficha col N</b> y el <b>reporte</b> descargados
                 </Paso>
               </ol>
-
-              <div className="flex flex-col gap-1.5">
-                <div className="flex flex-wrap gap-1.5">
-                  <Button
-                    onClick={doDescargarPdf}
-                    disabled={colisionesPdf.size > 0 || trabajando !== null}
-                    title={
-                      colisionesPdf.size > 0
-                        ? `Bloqueado por ${colisionesPdf.size} colisión(es) de nombre: ` +
-                          [...colisionesPdf].slice(0, 5).join(' · ') +
-                          (colisionesPdf.size > 5 ? ' …' : '')
-                        : 'Escribe el PDF con los nombres nuevos'
-                    }
-                    data-dl="pdf"
-                  >
-                    <Download size={14} /> {trabajando === 'pdf' ? 'Escribiendo…' : 'PDF renombrado'}
-                  </Button>
-                  <Button onClick={doDescargarFicha} disabled={!fichaFile || trabajando !== null} data-dl="ficha">
-                    <FileSpreadsheet size={14} /> {trabajando === 'ficha' ? 'Escribiendo…' : 'Ficha con col N'}
-                  </Button>
-                  <Button onClick={doDescargarReporte} disabled={trabajando !== null} data-dl="reporte">
-                    <FileText size={14} /> Reporte CSV
-                  </Button>
-                </div>
-                <label className="flex items-center gap-1.5 text-[11px] text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={limitarFuente}
-                    onChange={(e) => setLimitarFuente(e.target.checked)}
-                  />
-                  Topear el tamaño de fuente en
-                  <input
-                    type="number"
-                    min={4}
-                    max={24}
-                    value={tamanoFuente}
-                    onChange={(e) => setTamanoFuente(Number(e.target.value) || 10)}
-                    disabled={!limitarFuente}
-                    className="w-12 rounded border border-slate-300 px-1 py-0.5 disabled:opacity-40"
-                  />
-                  pt
-                </label>
-              </div>
-
-              <div className="flex-1" />
               <Button
                 onClick={() => setView('builder')}
-                disabled={!descargas.pdf}
-                title={descargas.pdf ? '' : 'Descargá primero el PDF renombrado: Etapa 1 y 2 trabajan sobre ese PDF.'}
+                title="Etapa 1 y 2 trabajan sobre el PDF renombrado"
                 data-continuar
               >
                 Continuar a Etapa 1 <ArrowRight size={14} />
               </Button>
             </div>
-
-            {avisoEscritura && <p className="mt-1.5 text-[11px] text-emerald-700">{avisoEscritura}</p>}
-            {avisosColM.length > 0 && (
-              <p className="mt-1.5 text-[11px] text-amber-700">
-                <b>{avisosColM.length} aviso(s) de tipeo en la col M</b> (se reportan, no se corrigen):{' '}
-                {avisosColM.slice(0, 4).map((a) => `${a.hoja}·${a.fila} ${etiquetaAviso(a.tipo)} ${a.detalle}`).join(' · ')}
-                {avisosColM.length > 4 ? ' …' : ''}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Dos paneles */}
-      <div className="flex-1 min-h-0 flex gap-2 px-3 pb-3">
-        {/* Izquierda */}
-        <div className="w-1/2 min-w-0 flex flex-col rounded-md border border-slate-200 bg-white">
-          <div className="flex items-center gap-2 px-2 py-1.5 border-b border-slate-200">
-            <div className="flex gap-1">
-              <button
-                onClick={() => setTab('ficha')}
-                className={`text-xs rounded px-2 py-1 ${tab === 'ficha' ? 'bg-brand-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-              >
-                Ficha {ficha ? `(${ficha.stats.filasDatos})` : ''}
-              </button>
-              <button
-                onClick={() => setTab('pdf')}
-                className={`text-xs rounded px-2 py-1 ${tab === 'pdf' ? 'bg-brand-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-              >
-                Campos PDF {pdf ? `(${pdf.leaves.length})` : ''}
-              </button>
-            </div>
-            <div className="relative flex-1">
-              <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="Buscar…"
-                className="w-full rounded-md border border-slate-300 pl-7 pr-2 py-1 text-xs outline-none focus:border-brand-500"
-              />
-            </div>
-          </div>
-
-          {tab === 'ficha' && (
-            <>
-              <div className="flex gap-1 px-2 py-1 border-b border-slate-100">
-                {(['pdf', 'solo-json', 'excluida', 'colision', 'todas'] as const).map((f) => (
-                  <button
-                    key={f}
-                    onClick={() => setFiltro(f)}
-                    className={`text-[11px] rounded px-2 py-0.5 border ${
-                      filtro === f ? 'bg-slate-700 text-white border-slate-700' : 'bg-white border-slate-300 text-slate-600'
-                    }`}
-                  >
-                    {f}
-                  </button>
-                ))}
-              </div>
-              <div className="flex-1 overflow-auto scroll-thin">
-                {!ficha && <p className="text-xs text-slate-400 p-4 text-center">Cargá la ficha cruda (.xlsx).</p>}
-                <table className="w-full text-[11px]">
-                  <tbody>
-                    {filasFicha.map((n, i) => {
-                      const r = n.fila;
-                      const idxEnPdf = filasPdf.indexOf(n);
-                      const asig = idxEnPdf >= 0 ? asigPorFila.get(idxEnPdf) : undefined;
-                      return (
-                        <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
-                          <td className="px-2 py-1 text-slate-400 whitespace-nowrap">
-                            {r.hoja}·{r.fila}
-                            {r.instancia && (
-                              <span className="ml-1 text-brand-600">{r.instancia.codigo}[{r.indiceInstancia}]</span>
-                            )}
-                          </td>
-                          <td className="px-2 py-1 text-slate-700 truncate max-w-[150px]" title={r.nombrePdf}>
-                            {r.nombrePdf}
-                          </td>
-                          <td className="px-2 py-1 text-slate-400 truncate max-w-[80px]">{r.valor}</td>
-                          <td
-                            className={`px-2 py-1 font-mono truncate max-w-[190px] ${
-                              n.colision ? 'text-red-600 font-semibold' : 'text-brand-700'
-                            }`}
-                            title={n.colision ? `COLISIÓN: ${n.nombre}` : n.nombre}
-                          >
-                            {n.nombre}
-                          </td>
-                          <td className="px-2 py-1">
-                            {asig ? (
-                              <span
-                                className={`rounded px-1 ${CONF_STYLE[asig.confianza]}`}
-                                title={[...asig.motivos, `campo(s): ${asig.leafIdx.map((li) => pdf!.leaves[li].name).join(', ')}`].join(' · ')}
-                              >
-                                {asig.confianza}
-                                {asig.leafIdx.length > 1 ? ` 1:${asig.leafIdx.length}` : ''}
-                              </span>
-                            ) : (
-                              <span
-                                className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`}
-                                title={[r.motivo, ...(r.notaSeñales ?? [])].filter(Boolean).join(' · ')}
-                              >
-                                {r.motivo ?? r.destino}
-                              </span>
-                            )}
-                            {!r.hojaAplica && (
-                              <span className="ml-1 rounded px-1 bg-red-50 text-red-500" title="La hoja no aplica a este formulario">
-                                hoja✕
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </>
           )}
 
-          {tab === 'pdf' &&
-            (!pdf ? (
-              <p className="text-xs text-slate-400 p-4 text-center">Cargá el PDF crudo.</p>
-            ) : (
-              <TablaCampos
-                leaves={pdf.leaves}
-                filasPdf={filasPdf}
-                ediciones={ediciones}
-                setEdiciones={setEdiciones}
-                confianzaPorLeaf={confianzaPorLeaf}
-                colisiones={colisionesPdf}
-                selected={selected}
-                onSelect={setSelected}
-                query={q}
-              />
-            ))}
+          {/* --- VER DETALLE: todo el diagnóstico, colapsado --- */}
+          {(ficha || pdf) && !modoRevision && (
+            <details
+              open={detalleAbierto}
+              onToggle={(e) => setDetalleAbierto((e.currentTarget as HTMLDetailsElement).open)}
+              className="rounded-md border border-slate-200 bg-white"
+              data-detalle
+            >
+              <summary className="cursor-pointer px-3 py-2 text-xs text-slate-600 select-none" data-ver-detalle>
+                Ver detalle
+              </summary>
+
+              <div className="px-3 pb-3 space-y-2">
+                {/* stats */}
+                <div className="grid grid-cols-4 gap-2">
+                  {ficha && (
+                    <>
+                      <Stat n={ficha.stats.filasDatos} l="filas ficha" />
+                      <Stat n={ficha.stats.pdf} l="van al PDF" tone="text-emerald-700" />
+                      <Stat n={ficha.stats.soloJson} l="solo JSON" />
+                      <Stat n={ficha.stats.excluidas} l="excluidas" tone="text-red-600" />
+                      <Stat
+                        n={ficha.stats.filasNota}
+                        l="filas-nota"
+                        tone={ficha.stats.filasNota ? 'text-amber-600' : 'text-slate-700'}
+                      />
+                      <Stat n={ficha.stats.filasMarcadorHoja} l="marcador hoja" />
+                      <Stat
+                        n={Object.keys(colisiones).length}
+                        l="colisiones ficha"
+                        tone={Object.keys(colisiones).length ? 'text-red-600' : 'text-slate-700'}
+                      />
+                    </>
+                  )}
+                  {regiones.length > 0 && <Stat n={regiones.length} l="regiones" tone="text-brand-700" />}
+                  {totalAnclas > 0 && <Stat n={totalAnclas} l="anclas por texto" tone="text-brand-700" />}
+                  {align && (
+                    <>
+                      <Stat n={`${align.stats.pctAlta}%`} l="confianza alta" tone="text-emerald-700" />
+                      <Stat n={align.stats.media} l="media" tone="text-amber-600" />
+                      <Stat n={align.stats.revisar} l="revisar" tone="text-red-600" />
+                      <Stat n={align.stats.relaciones1aN} l="1:N" />
+                    </>
+                  )}
+                  {pdf && (
+                    <>
+                      <Stat n={pdf.leaves.length} l="campos PDF" tone="text-brand-700" />
+                      <Stat n={pdf.totalWidgets} l="widgets" />
+                      <Stat n={pdf.pageCount} l="páginas" />
+                      <Stat
+                        n={pdf.sospechosos.length}
+                        l="multi-widget /Tx"
+                        tone={pdf.sospechosos.length ? 'text-amber-600' : 'text-slate-700'}
+                      />
+                    </>
+                  )}
+                </div>
+
+                {pdf && pdf.sospechosos.length > 0 && (
+                  <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                    <b>{pdf.sospechosos.length} campo(s) /Tx con varios widgets</b> — un /Btn multi-widget es normal
+                    (grupo de radios), pero un /Tx no: suele ser una colisión del PDF original.{' '}
+                    {pdf.sospechosos.map((l) => (
+                      <button
+                        key={l.name}
+                        onClick={() => setSelected(l.name)}
+                        className="underline decoration-dotted mr-2"
+                        title={`páginas ${l.paginas.map((x) => x + 1).join(', ')}`}
+                      >
+                        {l.name} ×{l.widgets.length} [p{l.paginas.map((x) => x + 1).join(',')}]
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Filas sin campo, partidas: las del bloque que no aplican a su
+                    instancia no son un problema, son el subset por geometría. */}
+                {align && (
+                  <div className="rounded-md border border-slate-200 px-3 py-2 text-[11px] text-slate-600" data-huerfanos>
+                    <div>
+                      <b>{huerfanosFichaPartidos.sinCampo.length}</b> fila(s) de ficha sin campo en el PDF
+                      {huerfanosFichaPartidos.sinCampo.length > 0 && (
+                        <span className="text-slate-400">
+                          {' '}
+                          ({huerfanosFichaPartidos.sinCampo
+                            .slice(0, 6)
+                            .map((i) => `${filasPdf[i].fila.hoja}-${filasPdf[i].fila.fila}`)
+                            .join(', ')}
+                          {huerfanosFichaPartidos.sinCampo.length > 6 ? '…' : ''})
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-slate-500">
+                      <b>{huerfanosFichaPartidos.noAplican.length}</b> fila(s) del bloque repetible que no aplican a su
+                      instancia — es el subset por geometría, no un error.
+                    </div>
+                    <div>
+                      <b>{align.huerfanosPdf.length}</b> campo(s) del PDF sin fila
+                      {align.huerfanosPdf.length > 0 && (
+                        <span className="text-slate-400">
+                          {' '}
+                          ({align.huerfanosPdf.slice(0, 6).map((i) => pdf!.leaves[i].name).join(', ')}
+                          {align.huerfanosPdf.length > 6 ? '…' : ''})
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {Object.keys(colisiones).length > 0 && (
+                  <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-[11px] text-red-700">
+                    <b>Colisiones entre nombres propuestos</b> (se marcan, no se desambiguan solas):{' '}
+                    {Object.entries(colisiones).map(([n, c]) => `${n} ×${c}`).join(' · ')}
+                  </div>
+                )}
+
+                {ficha && ficha.filasIgnoradas.length > 0 && (
+                  <div className="rounded-md border border-slate-300 px-3 py-1.5 text-[11px] text-slate-600">
+                    <b>{ficha.filasIgnoradas.length} fila(s) con contenido no contadas:</b>{' '}
+                    {ficha.filasIgnoradas.map((f) => `${f.hoja} R${f.fila}`).join(', ')}
+                  </div>
+                )}
+
+                {avisosColM.length > 0 && (
+                  <details className="rounded-md border border-slate-200 px-3 py-1.5 text-[11px]" data-avisos-colm>
+                    <summary className="cursor-pointer text-amber-700">
+                      {avisosColM.length} aviso(s) de tipeo en la col M — son una consulta al cliente, ya salen en el
+                      reporte CSV
+                    </summary>
+                    <ul className="mt-1 list-disc pl-4 text-slate-600">
+                      {avisosColM.map((a, i) => (
+                        <li key={i}>
+                          {a.hoja}·{a.fila} — {etiquetaAviso(a.tipo)}: {a.detalle}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+
+                {/* Instancias y regiones */}
+                {hojaInstanciable && instancias.length > 0 && (
+                  <div className="rounded-md border border-slate-200 px-3 py-2">
+                    <div className="text-[11px] font-medium text-slate-600 mb-1">
+                      Instancias del bloque <code>{hojaInstanciable}</code> — el PDF lo repite una vez por instancia.
+                      Los índices son decisión tuya.
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      {instancias.map((inst, i) => (
+                        <div key={inst.codigo} className="flex items-center gap-1.5 text-[11px]">
+                          <input
+                            type="checkbox"
+                            checked={inst.activa}
+                            onChange={(e) =>
+                              setInstancias((prev) =>
+                                prev.map((x, j) => (j === i ? { ...x, activa: e.target.checked } : x)),
+                              )
+                            }
+                          />
+                          <span className="font-medium text-slate-700 w-10">{inst.codigo}</span>
+                          <label className="text-slate-400">prefijo</label>
+                          <input
+                            value={inst.prefijo}
+                            onChange={(e) =>
+                              setInstancias((prev) =>
+                                prev.map((x, j) => (j === i ? { ...x, prefijo: e.target.value } : x)),
+                              )
+                            }
+                            className="w-20 rounded border border-slate-300 px-1 py-0.5 font-mono"
+                          />
+                          <label className="text-slate-400">personas[</label>
+                          <input
+                            type="number"
+                            value={inst.indice}
+                            onChange={(e) =>
+                              setInstancias((prev) =>
+                                prev.map((x, j) => (j === i ? { ...x, indice: Number(e.target.value) } : x)),
+                              )
+                            }
+                            className="w-12 rounded border border-slate-300 px-1 py-0.5"
+                          />
+                          <span className="text-slate-400">]</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {pdf && (
+                      <div className="mt-2 pt-2 border-t border-slate-100" data-regiones>
+                        <div className="text-[11px] font-medium text-slate-600 mb-1">
+                          Región de cada instancia en el PDF — la alineación corre <b>dentro</b> de la región y nunca
+                          cruza el límite. La siembra automática es orientativa: si algo quedó corrido, mové el primer o
+                          el último campo.
+                        </div>
+                        {regiones.length === 0 && (
+                          <p className="text-[11px] text-amber-700">
+                            No se pudo sembrar ninguna región: la alineación cae al pase global. Elegí el primer y
+                            último campo de cada instancia.
+                          </p>
+                        )}
+                        {regiones.map((r, i) => (
+                          <div key={r.codigo} className="flex flex-wrap items-center gap-1.5 text-[11px] mb-1">
+                            <span
+                              className="w-10 font-medium rounded px-1"
+                              style={{ background: colorRegion(i, 0.18), color: colorRegion(i, 1) }}
+                            >
+                              {r.codigo}
+                            </span>
+                            <span className="text-slate-400">desde</span>
+                            <select
+                              value={r.desdeLeaf}
+                              data-region-desde={r.codigo}
+                              onChange={(e) => moverRegion(i, 'desdeLeaf', Number(e.target.value))}
+                              className="rounded border border-slate-300 px-1 py-0.5 max-w-[200px]"
+                            >
+                              {pdf.leaves.map((l, j) => (
+                                <option key={j} value={j}>
+                                  #{l.readingIndex} p{l.page + 1} · {l.name}
+                                </option>
+                              ))}
+                            </select>
+                            <span className="text-slate-400">hasta</span>
+                            <select
+                              value={r.hastaLeaf}
+                              data-region-hasta={r.codigo}
+                              onChange={(e) => moverRegion(i, 'hastaLeaf', Number(e.target.value))}
+                              className="rounded border border-slate-300 px-1 py-0.5 max-w-[200px]"
+                            >
+                              {pdf.leaves.map((l, j) => (
+                                <option key={j} value={j}>
+                                  #{l.readingIndex} p{l.page + 1} · {l.name}
+                                </option>
+                              ))}
+                            </select>
+                            <span className="text-slate-500">
+                              {Math.max(0, r.hastaLeaf - r.desdeLeaf + 1)} campos ·{' '}
+                              {segmentos.find((x) => x.etiqueta === r.codigo)?.filaIdxs.length ?? 0} filas
+                            </span>
+                            <span className="text-slate-400" title={r.detalle}>
+                              {r.origen === 'manual' ? '(a mano)' : `(${r.origen})`}
+                            </span>
+                          </div>
+                        ))}
+                        {avisosRegion.length > 0 && (
+                          <details className="text-[11px] text-slate-500 mt-1">
+                            <summary className="cursor-pointer" data-avisos-regiones>
+                              {avisosRegion.length} aviso(s) de la siembra de regiones
+                            </summary>
+                            <ul className="list-disc pl-4 mt-0.5">
+                              {avisosRegion.map((a, i) => (
+                                <li key={i}>{a}</li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Tablas completas */}
+                <div className="flex flex-col rounded-md border border-slate-200 h-[440px]">
+                  <div className="flex items-center gap-2 px-2 py-1.5 border-b border-slate-200">
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => setTab('ficha')}
+                        className={`text-xs rounded px-2 py-1 ${tab === 'ficha' ? 'bg-brand-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        Ficha {ficha ? `(${ficha.stats.filasDatos})` : ''}
+                      </button>
+                      <button
+                        onClick={() => setTab('pdf')}
+                        className={`text-xs rounded px-2 py-1 ${tab === 'pdf' ? 'bg-brand-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        Campos PDF {pdf ? `(${pdf.leaves.length})` : ''}
+                      </button>
+                    </div>
+                    <div className="relative flex-1">
+                      <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        value={q}
+                        onChange={(e) => setQ(e.target.value)}
+                        placeholder="Buscar…"
+                        className="w-full rounded-md border border-slate-300 pl-7 pr-2 py-1 text-xs outline-none focus:border-brand-500"
+                      />
+                    </div>
+                  </div>
+
+                  {tab === 'ficha' && (
+                    <>
+                      <div className="flex gap-1 px-2 py-1 border-b border-slate-100">
+                        {(['pdf', 'solo-json', 'excluida', 'colision', 'todas'] as const).map((f) => (
+                          <button
+                            key={f}
+                            onClick={() => setFiltro(f)}
+                            className={`text-[11px] rounded px-2 py-0.5 border ${
+                              filtro === f
+                                ? 'bg-slate-700 text-white border-slate-700'
+                                : 'bg-white border-slate-300 text-slate-600'
+                            }`}
+                          >
+                            {f}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex-1 overflow-auto scroll-thin">
+                        {!ficha && <p className="text-xs text-slate-400 p-4 text-center">Cargá la ficha cruda (.xlsx).</p>}
+                        <table className="w-full text-[11px]">
+                          <tbody>
+                            {filasFicha.map((n, i) => {
+                              const r = n.fila;
+                              const idxEnPdf = filasPdf.indexOf(n);
+                              const asig = idxEnPdf >= 0 ? asigPorFila.get(idxEnPdf) : undefined;
+                              return (
+                                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50">
+                                  <td className="px-2 py-1 text-slate-400 whitespace-nowrap">
+                                    {r.hoja}·{r.fila}
+                                    {r.instancia && (
+                                      <span className="ml-1 text-brand-600">
+                                        {r.instancia.codigo}[{r.indiceInstancia}]
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="px-2 py-1 text-slate-700 truncate max-w-[150px]" title={r.nombrePdf}>
+                                    {r.nombrePdf}
+                                  </td>
+                                  <td className="px-2 py-1 text-slate-400 truncate max-w-[80px]">{r.valor}</td>
+                                  <td
+                                    className={`px-2 py-1 font-mono truncate max-w-[190px] ${
+                                      n.colision ? 'text-red-600 font-semibold' : 'text-brand-700'
+                                    }`}
+                                    title={n.colision ? `COLISIÓN: ${n.nombre}` : n.nombre}
+                                  >
+                                    {n.nombre}
+                                  </td>
+                                  <td className="px-2 py-1">
+                                    {asig ? (
+                                      <span
+                                        className={`rounded px-1 ${CONF_STYLE[asig.confianza]}`}
+                                        title={[
+                                          ...asig.motivos,
+                                          `campo(s): ${asig.leafIdx.map((li) => pdf!.leaves[li].name).join(', ')}`,
+                                        ].join(' · ')}
+                                      >
+                                        {asig.confianza}
+                                        {asig.leafIdx.length > 1 ? ` 1:${asig.leafIdx.length}` : ''}
+                                      </span>
+                                    ) : (
+                                      <span
+                                        className={`rounded px-1 ${DESTINO_STYLE[r.destino]}`}
+                                        title={[r.motivo, ...(r.notaSeñales ?? [])].filter(Boolean).join(' · ')}
+                                      >
+                                        {r.motivo ?? r.destino}
+                                      </span>
+                                    )}
+                                    {!r.hojaAplica && (
+                                      <span
+                                        className="ml-1 rounded px-1 bg-red-50 text-red-500"
+                                        title="La hoja no aplica a este formulario"
+                                      >
+                                        hoja✕
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+
+                  {tab === 'pdf' &&
+                    (!pdf ? (
+                      <p className="text-xs text-slate-400 p-4 text-center">Cargá el PDF crudo.</p>
+                    ) : (
+                      <TablaCampos
+                        leaves={pdf.leaves}
+                        filasPdf={filasPdf}
+                        ediciones={ediciones}
+                        setEdiciones={setEdiciones}
+                        confianzaPorLeaf={confianzaPorLeaf}
+                        colisiones={colisionesPdf}
+                        selected={selected}
+                        onSelect={setSelected}
+                        query={q}
+                      />
+                    ))}
+                </div>
+              </div>
+            </details>
+          )}
+
+          {nDescargas > 0 && !modoRevision && (
+            <p className="text-[10px] text-slate-400 px-1">
+              descargado: {descargas.pdf ? 'PDF · ' : ''}
+              {descargas.ficha ? 'ficha · ' : ''}
+              {descargas.reporte ? 'reporte' : ''}
+            </p>
+          )}
         </div>
 
         {/* Derecha: PDF con overlay */}
@@ -1074,6 +1308,7 @@ export default function Etapa0Screen() {
             confianza={confianzaPorLeaf}
             nombreFinal={nombreFinalPorLeaf}
             colisiones={colisionesPdf}
+            escalaMinima={modoRevision ? 1.75 : undefined}
           />
         </div>
       </div>

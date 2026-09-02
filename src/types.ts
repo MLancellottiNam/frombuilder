@@ -273,4 +273,8 @@ export interface Etapa0State {
   pdfDescargado: boolean;
   fichaDescargada: boolean;
   reporteDescargado: boolean;
+  /** ¿el panel «Ver detalle» quedó abierto? (preferencia de UI) */
+  detalleAbierto?: boolean;
+  /** nombres ACTUALES de los campos que el usuario confirmó a mano en la revisión */
+  confirmados?: string[];
 }
