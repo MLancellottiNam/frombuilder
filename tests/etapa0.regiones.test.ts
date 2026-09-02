@@ -15,13 +15,23 @@ import {
   marcarGruposDeOpciones,
 } from '../src/lib/etapa0/acroName';
 import { alinear, alinearPorSegmentos, type Segmento } from '../src/lib/etapa0/align';
+import { slug } from '../src/lib/etapa0/acroName';
 import {
+  evidenciaEnContra,
+  bandaDeLeaf,
   valorMatcheaTexto,
   bandasDeGrupo,
   saltoEntre,
   cortePorMayorSalto,
   sembrarRegiones,
   textItemDePdfjs,
+  etiquetasDeLeaf,
+  etiquetaPreferida,
+  anclasDeTexto,
+  mayorSubsecuenciaMonotona,
+  corridasContiguas,
+  construirSegmentos,
+  type FilaAncla,
   type GrupoOpciones,
   type TextItem,
 } from '../src/lib/etapa0/regiones';
@@ -165,6 +175,70 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
   ok(desb.huerfanosFicha.length === 1, `1 fila huérfana (got ${desb.huerfanosFicha.length})`);
   ok(desb.huerfanosPdf.length === 1 && desb.huerfanosPdf[0] === 1, 'el campo de B queda sin asignar en vez de recibir una fila de A');
 
+  // --- Fix C: anclas por la etiqueta impresa -------------------------------
+  {
+    // Una caja de texto con el rótulo a la izquierda y 3 casillas con el suyo
+    // a la derecha, como el CSC.
+    const ls = [leaf(1, 0, 700), leaf(2, 0, 650, '/Btn'), leaf(3, 0, 650, '/Btn'), leaf(4, 0, 650, '/Btn')];
+    const t: TextItem[] = [
+      ti('1er Apellido:', 0, 697, 10),
+      ti('Cédula', 0, 647, 165),
+      ti('DIMEX', 0, 647, 215),
+      ti('Pasaporte', 0, 647, 265),
+    ];
+    ls[0].rect.x = 100; // el rótulo "1er Apellido:" termina en x=62
+    ls[1].rect.x = 160;
+    ls[2].rect.x = 210;
+    ls[3].rect.x = 260;
+
+    const e0 = etiquetasDeLeaf(ls[0], t);
+    ok(e0.izq === '1er Apellido:', `la caja de texto toma el rótulo de la izquierda (got "${e0.izq}")`);
+    ok(etiquetaPreferida(ls[0], e0)[0] === '1er Apellido:', '/Tx prefiere la izquierda');
+    const e1 = etiquetasDeLeaf(ls[1], t);
+    ok(etiquetaPreferida(ls[1], e1)[0] === 'Cédula', `/Btn prefiere la derecha (got "${etiquetaPreferida(ls[1], e1)[0]}")`);
+    ok(etiquetaPreferida(ls[1], e1).length === 1, 'solo se devuelve el lado preferido, para no generar cruces');
+
+    const filas: FilaAncla[] = [
+      { idx: 0, nombrePdf: 'Tipo de Identificación', valor: 'DIMEX', esOpcion: true, grupo: 'tipo_de_identificacion' },
+      { idx: 1, nombrePdf: 'Tipo de Identificación', valor: 'Pasaporte', esOpcion: true, grupo: 'tipo_de_identificacion' },
+      { idx: 2, nombrePdf: 'Tipo de Identificación', valor: 'Institución Autónoma', esOpcion: true, grupo: 'tipo_de_identificacion' },
+      { idx: 3, nombrePdf: '1er Apellido', valor: 'Ulloa', esOpcion: false, grupo: '' },
+    ];
+    const r = anclasDeTexto(filas, ls, [0, 1, 2, 3], t);
+    const par = (f: number) => r.anclas.find((a) => a.filaIdx === f)?.leafIdx;
+    ok(par(3) === 0, `"1er Apellido" ancla en el campo de texto (got ${par(3)})`);
+    ok(par(0) === 2, `"DIMEX" ancla en su casilla (got ${par(0)})`);
+    ok(par(1) === 3, `"Pasaporte" ancla en su casilla (got ${par(1)})`);
+    ok(
+      r.opcionesForaneas.includes(2),
+      'la opción "Institución Autónoma" no existe en esta región: queda foránea y NO se fuerza',
+    );
+    ok(par(2) === undefined, 'y no se ancla en ninguna casilla ajena');
+    // el ancla cruza (la fila 3 va al campo 0) y eso es legítimo
+    ok(r.anclas.length === 3, `3 anclas aunque se crucen (got ${r.anclas.length})`);
+    ok(mayorSubsecuenciaMonotona(r.anclas).length < r.anclas.length, 'exigir monotonía tiraría anclas válidas');
+  }
+
+  // --- segmentos: tramos libres contiguos ----------------------------------
+  ok(JSON.stringify(corridasContiguas([0, 5, 6, 7, 9])) === JSON.stringify([[0], [5, 6, 7], [9]]), 'corridas contiguas');
+  {
+    // 1 campo libre arriba, una región en el medio, 2 campos libres al final.
+    const regs = [{ codigo: 'A', desdeLeaf: 1, hastaLeaf: 3, origen: 'opciones' as const, detalle: '' }];
+    const segs = construirSegmentos(6, regs, [
+      { codigo: null }, // fila libre, antes del bloque
+      { codigo: 'A' },
+      { codigo: 'A' },
+    ]);
+    const libres = segs.filter((x) => x.etiqueta.startsWith('libre'));
+    ok(libres.length === 2, `los tramos libres se parten en 2 zonas contiguas (got ${libres.length})`);
+    ok(libres[0].leafIdxs.length === 1 && libres[0].filaIdxs.length === 1, 'la zona de arriba recibe la fila libre');
+    ok(
+      libres[1].leafIdxs.length === 2 && libres[1].filaIdxs.length === 0,
+      'la zona del final queda sin filas: sus campos son huérfanos, no se fuerza nada',
+    );
+    ok(segs[0].etiqueta === 'A' && segs[0].filaIdxs.length === 2, 'la región A se queda con sus 2 filas');
+  }
+
   // --- fixtures reales -----------------------------------------------------
   const F_FICHA = path.resolve('fixtures/Ficha_de_configuración_-_Conozca_a_su_cliente.xlsx');
   const F_PDF = path.resolve('fixtures/BUC_Formulario_Conozca_Cliente_Homologado.pdf');
@@ -240,24 +314,31 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       `CSC: el borde ASG|PJR cae en y=339 por el salto de 27pt (got ${Math.round(pdf.leaves[rP.desdeLeaf].rect.y)})`,
     );
 
-    // segmentos y alineación
-    const porCodigo = new Map<string, number[]>();
-    filasPdf.forEach((n, k) => {
-      const c = n.fila.instancia?.codigo ?? 'libre';
-      if (!porCodigo.has(c)) porCodigo.set(c, []);
-      porCodigo.get(c)!.push(k);
-    });
-    const usados = new Set<number>();
-    const segsReal: Segmento[] = siembra.regiones.map((r) => {
-      const leafIdxs: number[] = [];
-      for (let j = r.desdeLeaf; j <= r.hastaLeaf; j++) {
-        leafIdxs.push(j);
-        usados.add(j);
-      }
-      return { etiqueta: r.codigo, filaIdxs: porCodigo.get(r.codigo) ?? [], leafIdxs };
-    });
-    const libres = pdf.leaves.map((_, j) => j).filter((j) => !usados.has(j));
-    if (libres.length) segsReal.push({ etiqueta: 'libre', filaIdxs: porCodigo.get('libre') ?? [], leafIdxs: libres });
+    // segmentos + anclas por texto (Fix C)
+    const segsReal = construirSegmentos(
+      pdf.leaves.length,
+      siembra.regiones,
+      filasPdf.map((n) => ({ codigo: n.fila.instancia?.codigo ?? null })),
+    );
+    for (const seg of segsReal) {
+      const fa: FilaAncla[] = seg.filaIdxs.map((i) => ({
+        idx: i,
+        nombrePdf: filasPdf[i].fila.nombrePdf,
+        valor: filasPdf[i].fila.valor,
+        esOpcion: !!filasPdf[i].partes.sufijo,
+        grupo: filasPdf[i].partes.base,
+      }));
+      const ar = anclasDeTexto(fa, pdf.leaves, seg.leafIdxs, txt);
+      seg.anclas = ar.anclas;
+      seg.excluirFilas = ar.opcionesForaneas;
+      console.log(`  segmento ${seg.etiqueta}: ${seg.filaIdxs.length} filas / ${seg.leafIdxs.length} campos / ${ar.anclas.length} anclas / ${ar.opcionesForaneas.length} opciones foráneas`);
+    }
+    const totalAnclas = segsReal.reduce((n2, s2) => n2 + (s2.anclas?.length ?? 0), 0);
+    ok(totalAnclas >= 40, `CSC: al menos 40 anclas por etiqueta impresa (got ${totalAnclas})`);
+    ok(
+      segsReal.filter((x) => x.etiqueta.startsWith('libre')).length >= 2,
+      'CSC: los tramos libres se parten en zonas contiguas (arriba de p1 y el pie de p2)',
+    );
 
     const alineables = filasPdf.map((n) => ({
       nombrePdf: n.fila.nombrePdf,
@@ -265,8 +346,24 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       tipo: n.fila.tipo,
       nombrePropuesto: n.nombre,
     }));
+    const esOpcion = (i: number) => !!filasPdf[i].partes.sufijo;
+    const evidencia = (i: number, j: number) =>
+      evidenciaEnContra(
+        {
+          leaves: pdf.leaves,
+          texto: txt,
+          bandas: siembra.bandas,
+          claveDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.valor : filasPdf[k].fila.nombrePdf),
+          grupoDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.nombrePdf : ''),
+          filasDelSegmento: (k) => segsReal.find((sg) => sg.filaIdxs.includes(k))?.filaIdxs ?? [],
+        },
+        i,
+        j,
+      );
     const global = alinear(alineables, pdf.leaves);
-    const porRegion = alinearPorSegmentos(alineables, pdf.leaves, segsReal);
+    const porRegion = alinearPorSegmentos(alineables, pdf.leaves, segsReal, {
+      evidenciaEnContra: evidencia,
+    });
     console.log('  global   :', JSON.stringify(global.stats));
     console.log('  regiones :', JSON.stringify(porRegion.stats));
 
@@ -286,8 +383,45 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
     const enP1 = (f: typeof fR, px: string) => f.filter((x) => x.name.startsWith(px) && x.leaf.page === 0).length;
     console.log(`  rpl_ en p1: global=${enP1(fG, 'rpl_')} regiones=${enP1(fR, 'rpl_')}`);
 
+    // --- Fix C: el reparto 5/4 del grupo partido sale del texto, no del orden ---
+    const etqDe = (j: number) => etiquetaPreferida(pdf.leaves[j], etiquetasDeLeaf(pdf.leaves[j], txt))[0] ?? '';
+    const tipoId = fR
+      .map((x, j) => ({ ...x, j }))
+      .filter((x) => /tipo_de_identificacion/.test(x.name) && pdf.leaves[x.j].ft === '/Btn');
+    console.log('  tipo de identificación:');
+    tipoId.forEach((x) => console.log(`    #${x.leaf.readingIndex} "${x.name}" sobre la etiqueta "${etqDe(x.j)}"`));
+    // El síntoma original: institucion_autonoma encima de la casilla "Pasaporte".
+    const sobrePasaporte = tipoId.filter((x) => /pasaporte/i.test(etqDe(x.j)));
+    ok(
+      sobrePasaporte.length > 0 && sobrePasaporte.every((x) => /_pasaporte$/.test(x.name)),
+      `CSC Fix C: la casilla rotulada "Pasaporte" se llama _pasaporte (got ${sobrePasaporte.map((x) => x.name).join(', ')})`,
+    );
+    const coherentes = tipoId.filter((x) => {
+      const e = slug(etqDe(x.j));
+      return e && x.name.endsWith('_' + e);
+    });
+    ok(
+      coherentes.length >= 6,
+      `CSC Fix C: al menos 6 casillas de tipo-id coinciden con su etiqueta impresa (got ${coherentes.length})`,
+    );
+    // Las opciones jurídicas viven en PJR y las físicas en ASG/RPL.
+    const enRegionDe = (px: string) => tipoId.filter((x) => x.name.startsWith(px)).map((x) => slug(etqDe(x.j)));
+    console.log('    ASG:', enRegionDe('asg_').join(', '), '| PJR:', enRegionDe('pjr_').join(', '), '| RPL:', enRegionDe('rpl_').join(', '));
+    ok(
+      !enRegionDe('asg_').some((e) => /juridic|gobierno|autonoma/.test(e)),
+      'CSC Fix C: ninguna opción jurídica cae en las casillas de ASG',
+    );
+
     // §6 — criterios de éxito de v1.4.1
     ok(enP1(fR, 'rpl_') === 0, `CSC §6: 0 campos rpl_* en la página 1 (got ${enP1(fR, 'rpl_')}; el pase global daba ${enP1(fG, 'rpl_')})`);
+    ok(
+      porRegion.stats.asignadas >= 105,
+      `CSC §6: al menos 105 de 111 campos asignados (got ${porRegion.stats.asignadas})`,
+    );
+    ok(
+      porRegion.huerfanosPdf.length <= 4,
+      `CSC §6: a lo sumo 4 campos del PDF sin fila (got ${porRegion.huerfanosPdf.length}: ${porRegion.huerfanosPdf.map((j) => pdf.leaves[j].name).join(', ')})`,
+    );
     ok(
       fR.filter((x) => x.name.startsWith('asg_')).every((x) => x.leaf.page === 0),
       'CSC §6: ningún asg_* fuera de la página de PERSONA FÍSICA',
@@ -297,7 +431,49 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
     ok(dentroDeRegion('asg_', rA), 'CSC §6: todos los asg_* caen dentro de la región ASG');
     ok(dentroDeRegion('pjr_', rP), 'CSC §6: todos los pjr_* caen dentro de la región PJR');
     ok(dentroDeRegion('rpl_', rR), 'CSC §6: todos los rpl_* caen dentro de la región RPL');
-    ok(porRegion.stats.pctAlta >= 70, `CSC §6: >=70% en confianza alta (got ${porRegion.stats.pctAlta}%)`);
+    // La confianza ya no se mide contra la secuencia global: los bordes de un
+    // tramo cuentan como anclados si el DP no salteó nada ahí. Eso sube el
+    // pctAlta de 78% a 95%. Pero además se DEGRADA lo que hay evidencia de que
+    // está mal, y eso lo baja de nuevo: el número final es más bajo y más
+    // honesto que el de antes, porque el 95% tenía errores silenciosos en alta.
+    console.log(`  confianza: alta=${porRegion.stats.alta} media=${porRegion.stats.media} revisar=${porRegion.stats.revisar}`);
+    ok(
+      porRegion.stats.alta + porRegion.stats.media + porRegion.stats.revisar === porRegion.stats.asignadas,
+      'CSC: el reparto de confianza cubre todas las asignaciones',
+    );
+    // Lo que importa: nada con evidencia en contra queda en `alta`.
+    const conEvidencia = porRegion.asignaciones.filter(
+      (a) => !a.motivos.some((m) => m.startsWith('la etiqueta impresa del PDF coincide')) && evidencia(a.filaIdx, a.leafIdx[0]),
+    );
+    ok(
+      conEvidencia.length > 0 && conEvidencia.every((a) => a.confianza === 'revisar'),
+      `CSC: las ${conEvidencia.length} asignaciones con evidencia en contra están todas en «revisar»`,
+    );
+    // Y lo que está respaldado por la etiqueta impresa sí queda en alta.
+    const respaldadas = porRegion.asignaciones.filter((a) =>
+      a.motivos.some((m) => m.startsWith('la etiqueta impresa del PDF coincide')),
+    );
+    ok(respaldadas.length >= 40, `CSC: >=40 asignaciones respaldadas por la etiqueta impresa (got ${respaldadas.length})`);
+    ok(
+      respaldadas.every((a) => a.confianza === 'alta'),
+      'CSC: todas las respaldadas por la etiqueta impresa quedan en alta',
+    );
+    ok(porRegion.stats.revisar > 0, `CSC: quedan casos para revisar a mano (got ${porRegion.stats.revisar})`);
+
+    // La banda solo descalifica CASILLAS: una caja de texto puede compartir la
+    // fila sin ser del grupo.
+    const nIdRpl = pdf.leaves.findIndex((l) => l.name === 'N de Identificación_2');
+    if (nIdRpl >= 0) {
+      ok(
+        bandaDeLeaf(pdf.leaves[nIdRpl], siembra.bandas) !== null && pdf.leaves[nIdRpl].ft === '/Tx',
+        'CSC: el "Nº de Identificación" del representante cae en la banda de tipo-id pero es /Tx',
+      );
+      const a = porRegion.asignaciones.find((x) => x.leafIdx.includes(nIdRpl));
+      ok(
+        !a || a.confianza !== 'revisar' || !a.motivos[0].startsWith('el campo está en la banda'),
+        'CSC: y por eso la banda NO lo descalifica',
+      );
+    }
 
     const cuenta = new Map<string, number>();
     fR.forEach((x) => cuenta.set(x.name, (cuenta.get(x.name) ?? 0) + 1));

@@ -34,6 +34,7 @@
 // ---------------------------------------------------------------------------
 
 import type { PdfLeaf } from './pdfFields';
+import type { Segmento } from './align';
 import { slug } from './acroName';
 
 /** Un fragmento de texto del PDF, ya proyectado a coordenadas PDF. */
@@ -368,4 +369,363 @@ const TONOS_REGION = [
 export function colorRegion(i: number, alpha: number): string {
   const [r, g, b] = TONOS_REGION[i % TONOS_REGION.length];
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// ---------------------------------------------------------------------------
+// Anclas por texto dentro de la región (Fix C de v1.4.1).
+//
+// EL PROBLEMA. Dentro de una región el orden de la ficha y el del PDF TAMBIÉN
+// difieren. En el CSC la ficha lista `Tipo de Identificación (×8) → N° de
+// Identificación → Correo → 1er Apellido → 2do Apellido → Nombre`, mientras el
+// PDF pinta `1er Apellido → 2do Apellido → Nombre → N° Identificación → las 8
+// casillas de tipo-id → … → Correo (#44)`. Un DP secuencial no puede reordenar:
+// terminaba dejando los apellidos huérfanos y poniendo
+// `asg_tipo_de_identificacion_institucion_autonoma` sobre la casilla "Pasaporte".
+//
+// LA SOLUCIÓN. El PDF trae la ETIQUETA IMPRESA al lado de cada campo, y la col C
+// de la ficha es justamente esa etiqueta (col F para las opciones de un grupo).
+// Se buscan los pares (fila, campo) cuya etiqueta coincide, se conservan solo los
+// INEQUÍVOCOS (una fila ↔ un campo dentro de la región) y MONÓTONOS, y esos
+// quedan como anclas fijas. El DP alinea únicamente los huecos entre anclas.
+//
+// Por qué solo los inequívocos: en el CSC "Detalle:" aparece 6 veces y
+// "Nacional" 7. Un match ambiguo no es evidencia, así que se descarta y esa zona
+// la resuelve la posición, como antes.
+// ---------------------------------------------------------------------------
+
+/** Distancia horizontal máxima entre una etiqueta y su campo. */
+const MAX_DIST_ETIQUETA = 90;
+
+export interface EtiquetaLeaf {
+  /** texto pegado a la izquierda, en la misma línea */
+  izq: string;
+  /** texto pegado a la derecha, en la misma línea */
+  der: string;
+}
+
+/**
+ * Etiquetas candidatas de un campo. Los campos de texto llevan el rótulo a la
+ * IZQUIERDA ("1er Apellido:" y después la caja); las casillas lo llevan a la
+ * DERECHA ("☐ Cédula ☐ DIMEX"). Se devuelven las dos y decide quien las use.
+ */
+export function etiquetasDeLeaf(leaf: PdfLeaf, texto: TextItem[]): EtiquetaLeaf {
+  const cy = leaf.rect.y + leaf.rect.h / 2;
+  const enLinea = texto.filter(
+    (t) => !t.rotado && t.page === leaf.page && Math.abs(t.y + 3 - cy) <= 9,
+  );
+  const izq = enLinea
+    .filter((t) => t.x + t.w <= leaf.rect.x + 4 && leaf.rect.x - (t.x + t.w) <= MAX_DIST_ETIQUETA)
+    .sort((a, b) => b.x + b.w - (a.x + a.w))[0];
+  const der = enLinea
+    .filter((t) => t.x >= leaf.rect.x - 4 && t.x - leaf.rect.x <= MAX_DIST_ETIQUETA)
+    .sort((a, b) => a.x - b.x)[0];
+  return { izq: izq?.str ?? '', der: der?.str ?? '' };
+}
+
+/**
+ * La etiqueta que corresponde al tipo de campo, y SOLO esa.
+ * Una casilla lleva el rótulo a la derecha ("☐ Cédula ☐ DIMEX"); una caja de
+ * texto, a la izquierda ("1er Apellido: [___]"). Mirar los dos lados parece más
+ * generoso pero genera cruces: el valor "DIDI" matchea la casilla de DIDI por
+ * derecha y la de Pasaporte por izquierda, las dos quedan ambiguas y se
+ * descartan. El otro lado solo se usa si el preferido está vacío.
+ */
+export function etiquetaPreferida(leaf: PdfLeaf, e: EtiquetaLeaf): string[] {
+  const [primero, segundo] = leaf.ft === '/Btn' ? [e.der, e.izq] : [e.izq, e.der];
+  return primero ? [primero] : segundo ? [segundo] : [];
+}
+
+export interface Ancla {
+  /** índice GLOBAL de fila */
+  filaIdx: number;
+  /** índice GLOBAL de campo */
+  leafIdx: number;
+  motivo: string;
+}
+
+export interface AnclasResult {
+  anclas: Ancla[];
+  /**
+   * Opciones de un grupo que NO pertenecen a esta región: el grupo tiene anclas
+   * acá (o sea su etiqueta impresa es legible) pero el valor de esta fila no
+   * aparece en ninguna etiqueta de la región. En el CSC "Tipo de Identificación"
+   * son 8 valores en la ficha y el PDF los reparte 5 (física, en ASG y RPL) y 4
+   * (jurídica, en PJR): las 3 sobrantes NO se fuerzan sobre las casillas ajenas,
+   * que es lo que ponía `institucion_autonoma` encima de "Pasaporte".
+   */
+  opcionesForaneas: number[];
+}
+
+/** Lo que la búsqueda de anclas necesita saber de una fila. */
+export interface FilaAncla {
+  /** índice global */
+  idx: number;
+  /** col C (nombre en PDF) */
+  nombrePdf: string;
+  /** col F (valor) — es la etiqueta cuando la fila es una opción de un grupo */
+  valor: string;
+  /** true si la fila pertenece a un grupo de opciones */
+  esOpcion: boolean;
+  /** identificador del grupo de opciones (el label); '' si no es opción */
+  grupo: string;
+}
+
+/** Subsecuencia creciente más larga por `leafIdx` (las anclas deben ser monótonas). */
+export function mayorSubsecuenciaMonotona(pares: Ancla[]): Ancla[] {
+  if (pares.length === 0) return [];
+  const orden = [...pares].sort((a, b) => a.filaIdx - b.filaIdx || a.leafIdx - b.leafIdx);
+  const largo = new Array(orden.length).fill(1);
+  const prev = new Array(orden.length).fill(-1);
+  let mejor = 0;
+  for (let i = 0; i < orden.length; i++) {
+    for (let j = 0; j < i; j++) {
+      if (orden[j].leafIdx < orden[i].leafIdx && largo[j] + 1 > largo[i]) {
+        largo[i] = largo[j] + 1;
+        prev[i] = j;
+      }
+    }
+    if (largo[i] > largo[mejor]) mejor = i;
+  }
+  const out: Ancla[] = [];
+  for (let i = mejor; i >= 0; i = prev[i]) out.push(orden[i]);
+  return out.reverse();
+}
+
+/**
+ * Anclas de un tramo: pares (fila, campo) cuya etiqueta impresa coincide de
+ * forma inequívoca. `filas` y `leafIdxs` son los de ESE tramo únicamente.
+ */
+export function anclasDeTexto(
+  filas: FilaAncla[],
+  leaves: PdfLeaf[],
+  leafIdxs: number[],
+  texto: TextItem[],
+  /**
+   * Exigir que las anclas no se cruzen. Por defecto NO, y es a propósito: el
+   * desorden entre ficha y PDF dentro del bloque no es monótono, así que pedir
+   * monotonía descarta justamente las anclas que arreglan el reordenamiento. En
+   * el CSC, exigirla tiraba las 5 casillas de tipo-id y las dejaba huérfanas.
+   */
+  monotonas = false,
+): AnclasResult {
+  // 1) etiquetas de cada campo del tramo
+  const etiquetas = new Map<number, string[]>();
+  for (const j of leafIdxs) {
+    const l = leaves[j];
+    if (!l) continue;
+    etiquetas.set(j, etiquetaPreferida(l, etiquetasDeLeaf(l, texto)).filter(Boolean));
+  }
+
+  // 2) todos los matches posibles
+  const porFila = new Map<number, number[]>();
+  const porLeaf = new Map<number, number[]>();
+  const opcionesEvaluadas: number[] = [];
+  for (const f of filas) {
+    // Una opción se identifica por su VALOR (col F); el resto por su col C.
+    const clave = f.esOpcion ? f.valor : f.nombrePdf;
+    if (slug(clave).replace(/_/g, '').length < 4) continue;
+    if (f.esOpcion) opcionesEvaluadas.push(f.idx);
+    for (const j of leafIdxs) {
+      const etqs = etiquetas.get(j) ?? [];
+      if (!etqs.some((e) => valorMatcheaTexto(clave, e))) continue;
+      if (!porFila.has(f.idx)) porFila.set(f.idx, []);
+      porFila.get(f.idx)!.push(j);
+      if (!porLeaf.has(j)) porLeaf.set(j, []);
+      porLeaf.get(j)!.push(f.idx);
+    }
+  }
+
+  // 3) solo los mutuamente únicos: un match ambiguo no es evidencia
+  const candidatas: Ancla[] = [];
+  for (const [filaIdx, js] of porFila) {
+    if (js.length !== 1) continue;
+    const j = js[0];
+    if ((porLeaf.get(j) ?? []).length !== 1) continue;
+    const f = filas.find((x) => x.idx === filaIdx)!;
+    candidatas.push({
+      filaIdx,
+      leafIdx: j,
+      motivo: `la etiqueta impresa del PDF coincide con ${f.esOpcion ? 'el valor (col F)' : 'el nombre (col C)'}`,
+    });
+  }
+
+  // 4) el cruce entre anclas es legítimo (los órdenes difieren de verdad), así
+  //    que solo se filtra si el llamador lo pide.
+  const anclas = monotonas ? mayorSubsecuenciaMonotona(candidatas) : candidatas;
+
+  // 5) grupos partidos entre regiones: si alguna opción del grupo se ancló acá,
+  //    las etiquetas del grupo son legibles en esta región; entonces una opción
+  //    sin NINGÚN match de etiqueta simplemente no vive acá.
+  const gruposConAncla = new Set(
+    anclas
+      .map((a) => filas.find((f) => f.idx === a.filaIdx))
+      .filter((f): f is FilaAncla => !!f && f.esOpcion)
+      .map((f) => f.grupo),
+  );
+  const opcionesForaneas = opcionesEvaluadas.filter((idx) => {
+    const f = filas.find((x) => x.idx === idx)!;
+    if (!gruposConAncla.has(f.grupo)) return false;
+    return (porFila.get(idx) ?? []).length === 0;
+  });
+
+  return { anclas, opcionesForaneas };
+}
+
+// ---------------------------------------------------------------------------
+// Construcción de segmentos.
+//
+// Se centraliza acá para que la UI y los tests usen exactamente la misma lógica.
+//
+// Los tramos LIBRES (los que no caen en ninguna región) no son un solo segmento:
+// son zonas contiguas separadas. En el CSC el tramo libre son el campo del tope
+// de la página 1 y los dos del pie de la página 2 (el bloque de firmas). Metidos
+// en un solo segmento, las filas "Lugar" y "Fecha: día/mes/año" de la ficha se
+// iban a los campos de la firma. Cada corrida contigua es su propio segmento, y
+// las filas libres se reparten por su posición respecto del bloque repetible.
+// ---------------------------------------------------------------------------
+
+export interface FilaSegmentable {
+  /** código de instancia; null si la fila no pertenece al bloque repetible */
+  codigo: string | null;
+}
+
+/** Corridas de índices consecutivos dentro de un conjunto. */
+export function corridasContiguas(idxs: number[]): number[][] {
+  const orden = [...idxs].sort((a, b) => a - b);
+  const out: number[][] = [];
+  for (const i of orden) {
+    const ultima = out[out.length - 1];
+    if (ultima && i === ultima[ultima.length - 1] + 1) ultima.push(i);
+    else out.push([i]);
+  }
+  return out;
+}
+
+export function construirSegmentos(
+  totalLeaves: number,
+  regiones: Region[],
+  filas: FilaSegmentable[],
+): Segmento[] {
+  const porCodigo = new Map<string, number[]>();
+  filas.forEach((f, k) => {
+    const c = f.codigo ?? '';
+    if (!c) return;
+    if (!porCodigo.has(c)) porCodigo.set(c, []);
+    porCodigo.get(c)!.push(k);
+  });
+
+  const usados = new Set<number>();
+  const out: Segmento[] = [];
+  for (const r of regiones) {
+    const leafIdxs: number[] = [];
+    for (let j = Math.max(0, r.desdeLeaf); j <= Math.min(totalLeaves - 1, r.hastaLeaf); j++) {
+      if (usados.has(j)) continue; // dos regiones no comparten un campo
+      leafIdxs.push(j);
+      usados.add(j);
+    }
+    out.push({ etiqueta: r.codigo, filaIdxs: porCodigo.get(r.codigo) ?? [], leafIdxs });
+  }
+
+  // Filas libres, partidas por su posición respecto del bloque repetible.
+  const idxBloque = filas.map((f, k) => (f.codigo ? k : -1)).filter((k) => k >= 0);
+  const primeroBloque = idxBloque.length ? Math.min(...idxBloque) : Infinity;
+  const ultimoBloque = idxBloque.length ? Math.max(...idxBloque) : -1;
+  const libresAntes: number[] = [];
+  const libresDespues: number[] = [];
+  filas.forEach((f, k) => {
+    if (f.codigo) return;
+    if (k < primeroBloque) libresAntes.push(k);
+    else if (k > ultimoBloque) libresDespues.push(k);
+    else libresAntes.push(k); // sin bloque: todo va al primer tramo
+  });
+
+  const libres = Array.from({ length: totalLeaves }, (_, j) => j).filter((j) => !usados.has(j));
+  const corridas = corridasContiguas(libres);
+  const primeraRegion = out.find((s) => s.leafIdxs.length > 0);
+  const inicioRegiones = primeraRegion ? primeraRegion.leafIdxs[0] : totalLeaves;
+  corridas.forEach((corrida, i) => {
+    const antes = corrida[corrida.length - 1] < inicioRegiones;
+    out.push({
+      etiqueta: `libre-${antes ? 'antes' : 'despues'}${corridas.length > 1 ? `-${i + 1}` : ''}`,
+      filaIdxs: antes ? libresAntes : libresDespues,
+      leafIdxs: corrida,
+    });
+  });
+
+  // Una fila libre no puede competir en dos tramos a la vez: se deja solo en el
+  // primero que la reclame.
+  const yaVista = new Set<number>();
+  for (const seg of out) {
+    if (!seg.etiqueta.startsWith('libre')) continue;
+    seg.filaIdxs = seg.filaIdxs.filter((i) => !yaVista.has(i));
+    for (const i of seg.filaIdxs) yaVista.add(i);
+  }
+  return out;
+}
+
+// --- evidencia en contra ----------------------------------------------------
+
+/** ¿El campo `j` cae dentro de la banda de algún grupo de opciones? */
+export function bandaDeLeaf(leaf: PdfLeaf, bandas: BandaOpciones[], tolerancia = 10): BandaOpciones | null {
+  const cy = leaf.rect.y + leaf.rect.h / 2;
+  for (const b of bandas) {
+    if (b.page !== leaf.page) continue;
+    if (Math.abs(b.y + 3 - cy) <= tolerancia) return b;
+  }
+  return null;
+}
+
+export interface EntradaEvidencia {
+  leaves: PdfLeaf[];
+  texto: TextItem[];
+  bandas: BandaOpciones[];
+  /** clave identificatoria de la fila: col F si es opción, col C si no */
+  claveDeFila: (filaIdx: number) => string;
+  /** label del grupo de la fila; '' si no es opción */
+  grupoDeFila: (filaIdx: number) => string;
+  /** filas que compiten en el mismo segmento que `filaIdx` */
+  filasDelSegmento: (filaIdx: number) => number[];
+}
+
+/**
+ * Evidencia POSITIVA de que un par (fila, campo) está mal. Dos señales:
+ *
+ *  a) la etiqueta impresa del campo identifica a OTRA fila del mismo segmento:
+ *     sabemos de quién es ese campo, y no es de esta fila.
+ *  b) el campo cae dentro de la banda de un grupo de opciones y la fila no
+ *     pertenece a ese grupo: en el CSC eso agarra la fila de la pregunta PEP
+ *     puesta encima de la casilla "Cédula" del tipo de identificación.
+ *
+ * Un simple "la etiqueta no coincide" NO alcanza: la ficha dice "Física" donde
+ * el PDF imprime "Cédula", y eso es un hueco de vocabulario, no un error.
+ */
+export function evidenciaEnContra(e: EntradaEvidencia, filaIdx: number, leafIdx: number): string | null {
+  const leaf = e.leaves[leafIdx];
+  if (!leaf) return null;
+
+  // (a) la etiqueta impresa es de otra fila del segmento
+  const etq = etiquetaPreferida(leaf, etiquetasDeLeaf(leaf, e.texto))[0] ?? '';
+  if (etq) {
+    const propia = e.claveDeFila(filaIdx);
+    if (!valorMatcheaTexto(propia, etq)) {
+      const otra = e.filasDelSegmento(filaIdx).find((i) => i !== filaIdx && valorMatcheaTexto(e.claveDeFila(i), etq));
+      if (otra !== undefined) {
+        return `la etiqueta impresa «${etq}» corresponde a otra fila de la ficha`;
+      }
+    }
+  }
+
+  // (b) el campo pertenece a la banda de otro grupo de opciones.
+  //     Solo para CASILLAS: una caja de texto puede compartir la fila con las
+  //     casillas sin ser del grupo (en el CSC el "Nº de Identificación" del
+  //     representante está a 10pt de la banda de tipo-id y es legítimo).
+  const banda = leaf.ft === '/Btn' ? bandaDeLeaf(leaf, e.bandas) : null;
+  if (banda) {
+    const grupo = e.grupoDeFila(filaIdx);
+    if (slug(banda.label) !== slug(grupo)) {
+      return `el campo está en la banda del grupo «${banda.label}» y esta fila no pertenece a ese grupo`;
+    }
+  }
+
+  return null;
 }

@@ -26,9 +26,14 @@ import {
 } from '../../lib/etapa0/acroName';
 import { alinear, alinearPorSegmentos, type Asignacion, type Confianza, type Segmento } from '../../lib/etapa0/align';
 import {
+  anclasDeTexto,
   colorRegion,
+  construirSegmentos,
+  evidenciaEnContra,
   extraerTextoPdf,
   sembrarRegiones,
+  type BandaOpciones,
+  type FilaAncla,
   type GrupoOpciones,
   type Region,
   type TextItem,
@@ -217,6 +222,8 @@ export default function Etapa0Screen() {
 
   // Las regiones sembradas son ORIENTATIVAS: entran como estado editable y las
   // que el usuario ya tocó (`origen === 'manual'`) no se pisan.
+  const bandas = useMemo<BandaOpciones[]>(() => siembra?.bandas ?? [], [siembra]);
+
   useEffect(() => {
     if (!siembra) return;
     setAvisosRegion(siembra.avisos);
@@ -232,26 +239,29 @@ export default function Etapa0Screen() {
    */
   const segmentos = useMemo<Segmento[]>(() => {
     if (!pdf || regiones.length === 0) return [];
-    const porCodigo = new Map<string, number[]>();
-    filasPdf.forEach((n, k) => {
-      const c = n.fila.instancia?.codigo ?? 'libre';
-      if (!porCodigo.has(c)) porCodigo.set(c, []);
-      porCodigo.get(c)!.push(k);
-    });
-    const usados = new Set<number>();
-    const out: Segmento[] = regiones.map((r) => {
-      const leafIdxs: number[] = [];
-      for (let j = Math.max(0, r.desdeLeaf); j <= Math.min(pdf.leaves.length - 1, r.hastaLeaf); j++) {
-        if (usados.has(j)) continue; // dos regiones no pueden compartir un campo
-        leafIdxs.push(j);
-        usados.add(j);
-      }
-      return { etiqueta: r.codigo, filaIdxs: porCodigo.get(r.codigo) ?? [], leafIdxs };
-    });
-    const libres = pdf.leaves.map((_, j) => j).filter((j) => !usados.has(j));
-    if (libres.length) out.push({ etiqueta: 'libre', filaIdxs: porCodigo.get('libre') ?? [], leafIdxs: libres });
-    return out;
-  }, [pdf, regiones, filasPdf]);
+    const segs = construirSegmentos(
+      pdf.leaves.length,
+      regiones,
+      filasPdf.map((n) => ({ codigo: n.fila.instancia?.codigo ?? null })),
+    );
+    if (textoPdf.length === 0) return segs;
+    // Anclas por la etiqueta impresa del PDF, dentro de cada segmento.
+    for (const seg of segs) {
+      const fa: FilaAncla[] = seg.filaIdxs.map((i) => ({
+        idx: i,
+        nombrePdf: filasPdf[i].fila.nombrePdf,
+        valor: filasPdf[i].fila.valor,
+        // `partes.sufijo` no está vacío exactamente cuando la fila es una opción
+        // de un grupo: es la misma señal con la que se armó el nombre.
+        esOpcion: !!filasPdf[i].partes.sufijo,
+        grupo: filasPdf[i].partes.base,
+      }));
+      const r = anclasDeTexto(fa, pdf.leaves, seg.leafIdxs, textoPdf);
+      seg.anclas = r.anclas;
+      seg.excluirFilas = r.opcionesForaneas;
+    }
+    return segs;
+  }, [pdf, regiones, filasPdf, textoPdf]);
 
   const align = useMemo(() => {
     if (!pdf || filasPdf.length === 0) return null;
@@ -261,11 +271,26 @@ export default function Etapa0Screen() {
       tipo: n.fila.tipo,
       nombrePropuesto: n.nombre,
     }));
-    // Con regiones se alinea por segmentos; sin ellas, un solo pase global.
-    return segmentos.length > 0
-      ? alinearPorSegmentos(alineables, pdf.leaves, segmentos)
-      : alinear(alineables, pdf.leaves);
-  }, [pdf, filasPdf, segmentos]);
+    if (segmentos.length === 0) return alinear(alineables, pdf.leaves);
+    // Con regiones se alinea por segmentos, y se degrada a «revisar» todo par
+    // del que haya evidencia POSITIVA de que está mal.
+    const esOpcion = (i: number) => !!filasPdf[i].partes.sufijo;
+    return alinearPorSegmentos(alineables, pdf.leaves, segmentos, {
+      evidenciaEnContra: (i, j) =>
+        evidenciaEnContra(
+          {
+            leaves: pdf.leaves,
+            texto: textoPdf,
+            bandas,
+            claveDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.valor : filasPdf[k].fila.nombrePdf),
+            grupoDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.nombrePdf : ''),
+            filasDelSegmento: (k) => segmentos.find((sg) => sg.filaIdxs.includes(k))?.filaIdxs ?? [],
+          },
+          i,
+          j,
+        ),
+    });
+  }, [pdf, filasPdf, segmentos, textoPdf, bandas]);
 
   /** Mueve un borde de región a mano. Queda marcada como `manual` y no se pisa. */
   const moverRegion = (i: number, campo: 'desdeLeaf' | 'hastaLeaf', valor: number) =>
@@ -281,6 +306,8 @@ export default function Etapa0Screen() {
         return next;
       }),
     );
+
+  const totalAnclas = useMemo(() => segmentos.reduce((n, s2) => n + (s2.anclas?.length ?? 0), 0), [segmentos]);
 
   /** leafIdx -> código de instancia, para pintar las bandas y la tabla. */
   const regionPorLeaf = useMemo(() => {
@@ -635,6 +662,7 @@ export default function Etapa0Screen() {
               </>
             )}
             {regiones.length > 0 && <Stat n={regiones.length} l="regiones" tone="text-brand-700" />}
+            {totalAnclas > 0 && <Stat n={totalAnclas} l="anclas por texto" tone="text-brand-700" />}
             {align && (
               <>
                 <Stat n={`${align.stats.pctAlta}%`} l="confianza alta" tone="text-emerald-700" />

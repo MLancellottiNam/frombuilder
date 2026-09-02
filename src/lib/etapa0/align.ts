@@ -250,16 +250,39 @@ export function alinear(filas: FilaAlineable[], leaves: PdfLeaf[]): AlignResult 
   const huerfanosPdfFinal = huerfanosPdf.filter((x) => huerfanosPdfSet.has(x));
 
   // --- confianza ---
+  //
+  // "Anclado" = la asignación tiene un límite resuelto a los dos lados.
+  //
+  // Los EXTREMOS del tramo cuentan como anclados solo si el DP no salteó nada
+  // ahí: si la primera asignación arranca en la fila 0 y el campo 0, está
+  // pegada al borde del tramo, y ese borde es un límite CONOCIDO (una región, un
+  // ancla de texto, el fin del documento), no un hueco sin resolver. Si en
+  // cambio hubo un hueco, no está anclada.
+  //
+  // Antes el extremo contaba siempre como NO anclado, y eso penalizaba los
+  // cortes que la segmentación introduce a propósito: subir la corrección hacía
+  // BAJAR la confianza medida, que es exactamente lo que no tiene que pasar.
   const matchedFila = new Set(asignaciones.map((a) => a.filaIdx));
   asignaciones.forEach((a, idx) => {
     const p = cache[a.filaIdx][a.leafIdx[0]];
-    const vecinoPrev = idx > 0 && matchedFila.has(asignaciones[idx - 1].filaIdx);
-    const vecinoNext = idx < asignaciones.length - 1 && matchedFila.has(asignaciones[idx + 1].filaIdx);
+    const ultimoLeaf = a.leafIdx[a.leafIdx.length - 1];
+    const vecinoPrev =
+      idx > 0 ? matchedFila.has(asignaciones[idx - 1].filaIdx) : a.filaIdx === 0 && a.leafIdx[0] === 0;
+    const vecinoNext =
+      idx < asignaciones.length - 1
+        ? matchedFila.has(asignaciones[idx + 1].filaIdx)
+        : a.filaIdx === n - 1 && ultimoLeaf === m - 1;
     const anclado = vecinoPrev && vecinoNext;
 
     if (p.textoOk) a.motivos.unshift('el texto de la ficha aparece en el AcroName');
     if (!p.tipoOk) a.motivos.unshift(`desajuste de tipo: la ficha pide ${tipoEsperado(filas[a.filaIdx].tipo)}, el PDF trae ${leaves[a.leafIdx[0]].ft}`);
-    if (anclado && p.tipoOk) a.motivos.push('posición consistente entre vecinos alineados');
+    if (anclado && p.tipoOk) {
+      a.motivos.push(
+        idx === 0 || idx === asignaciones.length - 1
+          ? 'pegada al borde del tramo, sin huecos'
+          : 'posición consistente entre vecinos alineados',
+      );
+    }
 
     if (!p.tipoOk) a.confianza = 'revisar';
     else if (p.textoOk || anclado) a.confianza = 'alta';
@@ -305,12 +328,40 @@ export interface Segmento {
   filaIdxs: number[];
   /** índices GLOBALES de campos del PDF que pertenecen a este segmento */
   leafIdxs: number[];
+  /**
+   * Pares (fila, campo) fijos, sacados de la etiqueta impresa del PDF. Parten el
+   * segmento en tramos y el DP alinea solo los huecos. Sin esto el orden interno
+   * del bloque —que en el CSC difiere entre ficha y PDF— desplaza todo.
+   */
+  anclas?: { filaIdx: number; leafIdx: number; motivo: string }[];
+  /**
+   * Filas que NO deben competir por los campos de este segmento (opciones de un
+   * grupo que vive en otra región). Van derecho a huérfanas de ficha.
+   */
+  excluirFilas?: number[];
+}
+
+export interface OpcionesPorSegmentos {
+  /**
+   * Devuelve el motivo por el que este par está mal, o null si no hay evidencia
+   * en contra. Se usa para degradar a `revisar` una asignación que quedaría en
+   * `alta` por pura consistencia posicional, que es la peor clase de error:
+   * silenciosa.
+   *
+   * Solo debe devolver algo cuando la evidencia es POSITIVA (sabemos de quién es
+   * ese campo, o sabemos que el campo pertenece a otro grupo). Un "la etiqueta
+   * no coincide" genérico es ruido: castiga los huecos de vocabulario entre la
+   * ficha y el PDF —la ficha dice "Física" donde el PDF imprime "Cédula"— sin
+   * aportar información.
+   */
+  evidenciaEnContra?: (filaIdx: number, leafIdx: number) => string | null;
 }
 
 export function alinearPorSegmentos(
   filas: FilaAlineable[],
   leaves: PdfLeaf[],
   segmentos: Segmento[],
+  opts: OpcionesPorSegmentos = {},
 ): AlignResult {
   const asignaciones: Asignacion[] = [];
   const huerfanosFicha: number[] = [];
@@ -321,27 +372,63 @@ export function alinearPorSegmentos(
   for (const seg of segmentos) {
     for (const i of seg.filaIdxs) filasVistas.add(i);
     for (const j of seg.leafIdxs) leavesVistos.add(j);
-    const subFilas = seg.filaIdxs.map((i) => filas[i]);
-    const subLeaves = seg.leafIdxs.map((j) => leaves[j]);
-    if (subFilas.length === 0) {
+    if (seg.filaIdxs.length === 0) {
       huerfanosPdf.push(...seg.leafIdxs);
       continue;
     }
-    if (subLeaves.length === 0) {
+    if (seg.leafIdxs.length === 0) {
       huerfanosFicha.push(...seg.filaIdxs);
       continue;
     }
-    const r = alinear(subFilas, subLeaves);
+    // 1) Las anclas son asignaciones FIJAS. No se les exige monotonía: el orden
+    //    de la ficha y el del PDF difieren de verdad dentro del bloque, y las
+    //    anclas que se cruzan son justamente las que arreglan ese desorden.
+    const filasAncladas = new Set<number>();
+    const leavesAnclados = new Set<number>();
+    for (const a of seg.anclas ?? []) {
+      if (!seg.filaIdxs.includes(a.filaIdx) || !seg.leafIdxs.includes(a.leafIdx)) continue;
+      if (filasAncladas.has(a.filaIdx) || leavesAnclados.has(a.leafIdx)) continue;
+      filasAncladas.add(a.filaIdx);
+      leavesAnclados.add(a.leafIdx);
+      // La etiqueta impresa es la evidencia más fuerte que hay: confianza alta,
+      // sin recalcular por posición.
+      asignaciones.push({
+        filaIdx: a.filaIdx,
+        leafIdx: [a.leafIdx],
+        confianza: 'alta',
+        motivos: [a.motivo, `región «${seg.etiqueta}»`],
+        score: MATCH_TIPO_OK + BOOST_TEXTO,
+      });
+    }
+
+    // 2) El resto se alinea por posición, ya sin las filas y campos anclados y
+    //    sin las opciones que pertenecen a otra región.
+    const excluidas = new Set(seg.excluirFilas ?? []);
+    for (const i of seg.filaIdxs) if (excluidas.has(i) && !filasAncladas.has(i)) huerfanosFicha.push(i);
+    const restoFilas = seg.filaIdxs.filter((i) => !filasAncladas.has(i) && !excluidas.has(i));
+    const restoLeaves = seg.leafIdxs.filter((j) => !leavesAnclados.has(j));
+    if (restoFilas.length === 0) {
+      huerfanosPdf.push(...restoLeaves);
+      continue;
+    }
+    if (restoLeaves.length === 0) {
+      huerfanosFicha.push(...restoFilas);
+      continue;
+    }
+    const r = alinear(
+      restoFilas.map((i) => filas[i]),
+      restoLeaves.map((j) => leaves[j]),
+    );
     for (const a of r.asignaciones) {
       asignaciones.push({
         ...a,
-        filaIdx: seg.filaIdxs[a.filaIdx],
-        leafIdx: a.leafIdx.map((li) => seg.leafIdxs[li]),
+        filaIdx: restoFilas[a.filaIdx],
+        leafIdx: a.leafIdx.map((li) => restoLeaves[li]),
         motivos: [...a.motivos, `región «${seg.etiqueta}»`],
       });
     }
-    huerfanosFicha.push(...r.huerfanosFicha.map((i) => seg.filaIdxs[i]));
-    huerfanosPdf.push(...r.huerfanosPdf.map((j) => seg.leafIdxs[j]));
+    huerfanosFicha.push(...r.huerfanosFicha.map((i) => restoFilas[i]));
+    huerfanosPdf.push(...r.huerfanosPdf.map((j) => restoLeaves[j]));
   }
 
   // Lo que no cayó en ningún segmento también es huérfano: no se fuerza nada.
@@ -351,6 +438,18 @@ export function alinearPorSegmentos(
   leaves.forEach((_, j) => {
     if (!leavesVistos.has(j)) huerfanosPdf.push(j);
   });
+
+  // Degradación por evidencia en contra. No se toca lo que vino de un ancla:
+  // ahí la etiqueta impresa ES la evidencia a favor.
+  if (opts.evidenciaEnContra) {
+    for (const a of asignaciones) {
+      if (a.motivos.some((m) => m.startsWith('la etiqueta impresa del PDF coincide'))) continue;
+      const motivo = opts.evidenciaEnContra(a.filaIdx, a.leafIdx[0]);
+      if (!motivo) continue;
+      a.confianza = 'revisar';
+      a.motivos.unshift(motivo);
+    }
+  }
 
   asignaciones.sort((a, b) => a.leafIdx[0] - b.leafIdx[0]);
   huerfanosFicha.sort((a, b) => a - b);
