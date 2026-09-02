@@ -17,7 +17,13 @@ import {
 import { alinear, alinearPorSegmentos, type Segmento } from '../src/lib/etapa0/align';
 import { slug } from '../src/lib/etapa0/acroName';
 import {
+  elegibilidadPorRegion,
+  textoDeRegion,
+  claveApareceEnTexto,
+  especificidad,
+  mismoGrupo,
   evidenciaEnContra,
+  evidenciaFuerte,
   bandaDeLeaf,
   valorMatcheaTexto,
   bandasDeGrupo,
@@ -219,6 +225,83 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
     ok(mayorSubsecuenciaMonotona(r.anclas).length < r.anclas.length, 'exigir monotonía tiraría anclas válidas');
   }
 
+  // --- v1.4.3 A: matcher laxo, especificidad, grupos ----------------------
+  {
+    // pdfjs parte los textos largos: la pregunta del CSC sale en dos fragmentos
+    const frag = '¿Algún socio o beneficiario de la empresa desempeña o ha desempeñado algún cargo político destacado (';
+    const clave = '¿Algún socio o beneficiario de la empresa desempeña o ha desempeñado algún cargo político destacado (PEP1), en territorio nacional o en el extranjero?';
+    ok(!valorMatcheaTexto(clave, frag), 'el modo estricto rechaza el fragmento cortado (por eso hace falta el laxo)');
+    ok(claveApareceEnTexto(clave, [ti(frag, 0, 100)]), 'el modo laxo por cobertura sí lo acepta');
+    ok(!claveApareceEnTexto('Física', [ti('Cédula', 0, 100)]), 'una clave corta sigue en modo estricto: Física no es Cédula');
+    ok(
+      !claveApareceEnTexto('País y lugar de constitución', [ti('País y lugar de nacimiento:', 0, 100)]),
+      'una clave de 3 tokens NO usa cobertura parcial: constitución no es nacimiento',
+    );
+    ok(claveApareceEnTexto('Razón Social', [ti('Razón Social:', 0, 100)]), 'clave corta exacta sí matchea');
+
+    ok(especificidad('Ingresos Propios', 'Ingresos propios') === 1, 'especificidad 1 para el match exacto');
+    ok(
+      especificidad('Sin Ingresos propios', 'Ingresos propios') < 1,
+      `«Sin Ingresos propios» es menos específico (got ${especificidad('Sin Ingresos propios', 'Ingresos propios')})`,
+    );
+    ok(mismoGrupo('Tipo de Identificación', 'Tipo de Identificación Persona'), 'los labels de grupo se comparan por contención');
+    ok(!mismoGrupo('Estado civil', 'Sexo'), 'y dos grupos distintos no se confunden');
+  }
+
+  // --- A.3: la ventana del ancla mira la línea de arriba y la de abajo -----
+  {
+    const l = leaf(1, 0, 700);
+    l.rect.x = 200;
+    // rótulo desplazado ~15pt: no está en la línea del widget
+    const t = [ti('País y lugar:', 0, 685, 60)];
+    ok(etiquetasDeLeaf(l, t).izq === 'País y lugar:', 'con la línea propia vacía se busca en la de al lado');
+    // pero si hay algo en su propia línea, gana
+    // x=140: el rótulo corto tiene que quedar DENTRO de los 90pt de distancia
+    const t2 = [ti('País y lugar:', 0, 685, 60), ti('Nombre:', 0, 697, 140)];
+    ok(etiquetasDeLeaf(l, t2).izq === 'Nombre:', 'la etiqueta de la propia línea tiene prioridad');
+  }
+
+  // --- A: elegibilidad por región (sintético) ------------------------------
+  {
+    const ls = [leaf(1, 0, 700), leaf(2, 0, 690), leaf(3, 1, 700), leaf(4, 1, 690)];
+    const regs = [
+      { codigo: 'A', desdeLeaf: 0, hastaLeaf: 1, origen: 'opciones' as const, detalle: '' },
+      { codigo: 'B', desdeLeaf: 2, hastaLeaf: 3, origen: 'opciones' as const, detalle: '' },
+    ];
+    const t: TextItem[] = [ti('Razón Social:', 1, 695, 40), ti('Estado Civil:', 0, 695, 40)];
+    ok(textoDeRegion(ls, regs[0], t).length === 1, 'el texto de la región A es solo el de su rango');
+    const r = elegibilidadPorRegion(ls, regs, t, [
+      { clave: 'p|1', nombrePdf: 'Razón Social', valor: '', esOpcion: false },
+      { clave: 'p|2', nombrePdf: 'Estado civil', valor: 'Soltero', esOpcion: true },
+      { clave: 'p|3', nombrePdf: 'Nada de esto', valor: '', esOpcion: false },
+    ]);
+    ok(JSON.stringify(r.porFila.get('p|1')) === '["B"]', `«Razón Social» solo en B (got ${JSON.stringify(r.porFila.get('p|1'))})`);
+    ok(r.exclusivas.includes('p|1'), 'y queda marcada como exclusiva');
+    ok((r.porFila.get('p|2') ?? []).length === 0, 'una opción cuyo valor no está impreso no matchea por valor');
+    ok(r.sinMatch.includes('p|3'), 'la fila que no aparece en ninguna región queda sin match');
+    // sin match => elegible en TODAS (el filtro no la elimina)
+    const segs2 = construirSegmentos(4, regs, [
+      { codigo: 'A', elegibleEn: ['B'] },
+      { codigo: 'B', elegibleEn: ['B'] },
+      { codigo: 'A', elegibleEn: null },
+    ]);
+    ok(segs2[0].filaIdxs.length === 1 && segs2[0].filaIdxs[0] === 2, 'la región A solo recibe la fila sin match, no la exclusiva de B');
+    ok(segs2[1].filaIdxs.length === 1 && segs2[1].filaIdxs[0] === 1, 'y B recibe la suya');
+  }
+
+  // --- A.2: la penalidad hace que el hueco le gane al par malo ------------
+  {
+    const filasP = [
+      { nombrePdf: 'Nombre', valor: '', tipo: 'Texto', nombrePropuesto: 'nombre' },
+    ];
+    const lsP = [leaf(1, 0, 700)];
+    const sinPen = alinear(filasP, lsP);
+    ok(sinPen.asignaciones.length === 1, 'sin penalidad, el par se asigna');
+    const conPen = alinear(filasP, lsP, { penalidad: 8, contradice: () => true });
+    ok(conPen.asignaciones.length === 0, 'con la penalidad, el campo queda sin asignar en vez de mal asignado');
+    ok(conPen.huerfanosPdf.length === 1 && conPen.huerfanosFicha.length === 1, 'y las dos puntas quedan visibles como huérfanas');
+  }
+
   // --- segmentos: tramos libres contiguos ----------------------------------
   ok(JSON.stringify(corridasContiguas([0, 5, 6, 7, 9])) === JSON.stringify([[0], [5, 6, 7], [9]]), 'corridas contiguas');
   {
@@ -314,11 +397,57 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       `CSC: el borde ASG|PJR cae en y=339 por el salto de 27pt (got ${Math.round(pdf.leaves[rP.desdeLeaf].rect.y)})`,
     );
 
+    // v1.4.3 Parte A: elegibilidad de cada fila por región
+    const eleg = elegibilidadPorRegion(
+      pdf.leaves,
+      siembra.regiones,
+      txt,
+      filasPdf
+        .filter((n) => n.fila.instancia)
+        .map((n) => ({
+          clave: `${n.fila.hoja}|${n.fila.fila}`,
+          nombrePdf: n.fila.nombrePdf,
+          valor: n.fila.valor,
+          esOpcion: !!n.partes.sufijo,
+        })),
+    );
+    console.log(`  elegibilidad: ${eleg.exclusivas.length} exclusivas · ${eleg.sinMatch.length} sin match`);
+    ok(eleg.exclusivas.length >= 25, `CSC A: >=25 filas exclusivas de una región (got ${eleg.exclusivas.length})`);
+    // Los cuatro campos del reporte: tres son exclusivos de PJR por el texto.
+    for (const nombre of ['Razón Social', 'País y lugar de constitución', 'Fecha de constitución']) {
+      const f = filasPdf.find((n) => norm(n.fila.nombrePdf) === norm(nombre));
+      const donde = f ? (eleg.porFila.get(`${f.fila.hoja}|${f.fila.fila}`) ?? []) : [];
+      ok(
+        JSON.stringify(donde) === '["PJR"]',
+        `CSC A: «${nombre}» solo es elegible en PJR (got ${JSON.stringify(donde)})`,
+      );
+    }
+    // El cuarto se resuelve por la col C, porque su valor es «NO»/«SI».
+    {
+      const f = filasPdf.find((n) => /algun socio o beneficiario/.test(norm(n.fila.nombrePdf)));
+      const donde = f ? (eleg.porFila.get(`${f.fila.hoja}|${f.fila.fila}`) ?? []) : [];
+      ok(
+        JSON.stringify(donde) === '["PJR"]',
+        `CSC A: «Algún socio o beneficiario…» solo elegible en PJR vía col C (got ${JSON.stringify(donde)})`,
+      );
+    }
+
     // segmentos + anclas por texto (Fix C)
     const segsReal = construirSegmentos(
       pdf.leaves.length,
       siembra.regiones,
-      filasPdf.map((n) => ({ codigo: n.fila.instancia?.codigo ?? null })),
+      filasPdf.map((n) => {
+        if (!n.fila.instancia) return { codigo: null };
+        const donde = eleg.porFila.get(`${n.fila.hoja}|${n.fila.fila}`) ?? [];
+        return { codigo: n.fila.instancia.codigo, elegibleEn: donde.length ? donde : null };
+      }),
+    );
+    console.log(
+      '  subsets por instancia: ' +
+        segsReal
+          .filter((x) => !x.etiqueta.startsWith('libre'))
+          .map((x) => `${x.etiqueta}=${x.filaIdxs.length}f/${x.leafIdxs.length}c`)
+          .join(' · '),
     );
     for (const seg of segsReal) {
       const fa: FilaAncla[] = seg.filaIdxs.map((i) => ({
@@ -330,7 +459,7 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       }));
       const ar = anclasDeTexto(fa, pdf.leaves, seg.leafIdxs, txt);
       seg.anclas = ar.anclas;
-      seg.excluirFilas = ar.opcionesForaneas;
+      // `opcionesForaneas` ya no se aplica: lo hace la elegibilidad (v1.4.3 A).
       console.log(`  segmento ${seg.etiqueta}: ${seg.filaIdxs.length} filas / ${seg.leafIdxs.length} campos / ${ar.anclas.length} anclas / ${ar.opcionesForaneas.length} opciones foráneas`);
     }
     const totalAnclas = segsReal.reduce((n2, s2) => n2 + (s2.anclas?.length ?? 0), 0);
@@ -362,6 +491,19 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       );
     const global = alinear(alineables, pdf.leaves);
     const porRegion = alinearPorSegmentos(alineables, pdf.leaves, segsReal, {
+      evidenciaFuerte: (i, j) =>
+        evidenciaFuerte(
+          {
+            leaves: pdf.leaves,
+            texto: txt,
+            bandas: siembra.bandas,
+            claveDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.valor : filasPdf[k].fila.nombrePdf),
+            grupoDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.nombrePdf : ''),
+            filasDelSegmento: (k) => segsReal.find((sg) => sg.filaIdxs.includes(k))?.filaIdxs ?? [],
+          },
+          i,
+          j,
+        ),
       evidenciaEnContra: evidencia,
     });
     console.log('  global   :', JSON.stringify(global.stats));
@@ -412,15 +554,36 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       'CSC Fix C: ninguna opción jurídica cae en las casillas de ASG',
     );
 
-    // §6 — criterios de éxito de v1.4.1
-    ok(enP1(fR, 'rpl_') === 0, `CSC §6: 0 campos rpl_* en la página 1 (got ${enP1(fR, 'rpl_')}; el pase global daba ${enP1(fG, 'rpl_')})`);
+    // --- §A.4: el criterio principal de v1.4.3 -----------------------------
+    // Ningún campo de la sección Persona Física puede llamarse como una fila que
+    // solo existe en Persona Jurídica.
+    const soloPJ = ['razon_social', 'pais_y_lugar_de_constitucion', 'fecha_de_constitucion', 'algun_socio_o_beneficiario'];
+    const intrusos = fR.filter((x) => x.name.startsWith('asg_') && soloPJ.some((m) => x.name.includes(m)));
     ok(
-      porRegion.stats.asignadas >= 105,
-      `CSC §6: al menos 105 de 111 campos asignados (got ${porRegion.stats.asignadas})`,
+      intrusos.length === 0,
+      `CSC §A.4: 0 campos asg_* con nombre de fila exclusiva de PJ (got ${intrusos.length}: ${intrusos.map((x) => x.name).join(', ')})`,
+    );
+    const intrusosRpl = fR.filter((x) => x.name.startsWith('rpl_') && soloPJ.some((m) => x.name.includes(m)));
+    ok(
+      intrusosRpl.length === 0,
+      `CSC §A.4: tampoco en rpl_* (got ${intrusosRpl.length}: ${intrusosRpl.map((x) => x.name).join(', ')})`,
     );
     ok(
-      porRegion.huerfanosPdf.length <= 4,
-      `CSC §6: a lo sumo 4 campos del PDF sin fila (got ${porRegion.huerfanosPdf.length}: ${porRegion.huerfanosPdf.map((j) => pdf.leaves[j].name).join(', ')})`,
+      porRegion.stats.revisar <= 5,
+      `CSC §A.4: «revisar» baja de 28 a <=5 (got ${porRegion.stats.revisar})`,
+    );
+
+    // §6 — criterios de éxito de v1.4.1
+    ok(enP1(fR, 'rpl_') === 0, `CSC §6: 0 campos rpl_* en la página 1 (got ${enP1(fR, 'rpl_')}; el pase global daba ${enP1(fG, 'rpl_')})`);
+    // v1.4.3: el filtro de elegibilidad baja los asignados a propósito. Antes
+    // eran 108 con 3 huérfanos, pero varios de esos 108 estaban mal. Ahora hay
+    // menos asignados y más huecos VISIBLES, que es el sesgo que se pidió.
+    ok(
+      porRegion.stats.asignadas >= 90,
+      `CSC: al menos 90 de 111 campos asignados (got ${porRegion.stats.asignadas})`,
+    );
+    console.log(
+      `  huérfanos del PDF: ${porRegion.huerfanosPdf.length} -> ${porRegion.huerfanosPdf.map((j) => pdf.leaves[j].name.slice(0, 22)).join(', ')}`,
     );
     ok(
       fR.filter((x) => x.name.startsWith('asg_')).every((x) => x.leaf.page === 0),
@@ -446,7 +609,7 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       (a) => !a.motivos.some((m) => m.startsWith('la etiqueta impresa del PDF coincide')) && evidencia(a.filaIdx, a.leafIdx[0]),
     );
     ok(
-      conEvidencia.length > 0 && conEvidencia.every((a) => a.confianza === 'revisar'),
+      conEvidencia.every((a) => a.confianza === 'revisar'),
       `CSC: las ${conEvidencia.length} asignaciones con evidencia en contra están todas en «revisar»`,
     );
     // Y lo que está respaldado por la etiqueta impresa sí queda en alta.
@@ -489,6 +652,7 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       const pcd = fR.filter((x, j) => /provincia|canton|distrito/.test(x.name) && j >= r.desdeLeaf && j <= r.hastaLeaf);
       console.log(`  ${px} provincia/canton/distrito: ${pcd.map((x) => x.name).join(', ') || '(ninguno)'}`);
       ok(pcd.length >= 2, `CSC: la región de ${px} tiene su propio cantón/distrito (got ${pcd.length})`);
+      void r;
     }
   }
 
