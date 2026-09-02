@@ -445,7 +445,17 @@ export interface EtiquetaLeaf {
 export function etiquetasDeLeaf(leaf: PdfLeaf, texto: TextItem[]): EtiquetaLeaf {
   const cy = leaf.rect.y + leaf.rect.h / 2;
   const buscar = (tol: number): EtiquetaLeaf => {
-    const enLinea = texto.filter((t) => !t.rotado && t.page === leaf.page && Math.abs(t.y + 3 - cy) <= tol);
+    const enLinea = texto.filter(
+      (t) =>
+        !t.rotado &&
+        t.page === leaf.page &&
+        Math.abs(t.y + 3 - cy) <= tol &&
+        // Un texto de solo guiones, puntos o espacios no es una etiqueta: es el
+        // placeholder de la línea a completar. En el CSC la fecha del
+        // representante trae "_____ / _____ /_______" entre sus tres cajas, y
+        // tomarlo por rótulo cortaba la corrida y dejaba dos cajas huérfanas.
+        /[a-z0-9]/i.test(t.str),
+    );
     const izq = enLinea
       .filter((t) => t.x + t.w <= leaf.rect.x + 4 && leaf.rect.x - (t.x + t.w) <= MAX_DIST_ETIQUETA)
       .sort((a, b) => b.x + b.w - (a.x + a.w))[0];
@@ -480,8 +490,13 @@ export function etiquetaPreferida(leaf: PdfLeaf, e: EtiquetaLeaf): string[] {
 export interface Ancla {
   /** índice GLOBAL de fila */
   filaIdx: number;
-  /** índice GLOBAL de campo */
-  leafIdx: number;
+  /**
+   * Índices GLOBALES de campo. Normalmente uno; varios cuando una sola fila se
+   * pinta en una CORRIDA de cajas (la fecha partida en día/mes/año).
+   */
+  leafIdxs: number[];
+  /** sufijo por caja cuando hay corrida; `undefined` = numérico `_1.._n` */
+  sufijos?: string[];
   motivo: string;
 }
 
@@ -513,6 +528,8 @@ export interface FilaAncla {
   esOpcion: boolean;
   /** identificador del grupo de opciones (el label); '' si no es opción */
   grupo: string;
+  /** col E (tipo de dato). Solo hace falta para detectar el 1:N de fechas. */
+  tipo?: string;
 }
 
 /**
@@ -532,13 +549,13 @@ export function especificidad(clave: string, etiqueta: string): number {
 /** Subsecuencia creciente más larga por `leafIdx` (las anclas deben ser monótonas). */
 export function mayorSubsecuenciaMonotona(pares: Ancla[]): Ancla[] {
   if (pares.length === 0) return [];
-  const orden = [...pares].sort((a, b) => a.filaIdx - b.filaIdx || a.leafIdx - b.leafIdx);
+  const orden = [...pares].sort((a, b) => a.filaIdx - b.filaIdx || a.leafIdxs[0] - b.leafIdxs[0]);
   const largo = new Array(orden.length).fill(1);
   const prev = new Array(orden.length).fill(-1);
   let mejor = 0;
   for (let i = 0; i < orden.length; i++) {
     for (let j = 0; j < i; j++) {
-      if (orden[j].leafIdx < orden[i].leafIdx && largo[j] + 1 > largo[i]) {
+      if (orden[j].leafIdxs[0] < orden[i].leafIdxs[0] && largo[j] + 1 > largo[i]) {
         largo[i] = largo[j] + 1;
         prev[i] = j;
       }
@@ -632,14 +649,16 @@ export function anclasDeTexto(
     const f = filas.find((x) => x.idx === p.filaIdx)!;
     candidatas.push({
       filaIdx: p.filaIdx,
-      leafIdx: p.leafIdx,
+      leafIdxs: [p.leafIdx],
       motivo: `la etiqueta impresa del PDF coincide con ${f.esOpcion ? 'el valor (col F)' : 'el nombre (col C)'}`,
     });
   }
 
   // 4) el cruce entre anclas es legítimo (los órdenes difieren de verdad), así
   //    que solo se filtra si el llamador lo pide.
-  const anclas = monotonas ? mayorSubsecuenciaMonotona(candidatas) : candidatas;
+  let anclas = monotonas ? mayorSubsecuenciaMonotona(candidatas) : candidatas;
+  // B0.2: una fila de fecha anclada a la primera caja se extiende a su corrida.
+  anclas = extenderAnclasEnCorridas(anclas, filas, leaves, leafIdxs, texto);
 
   // 5) grupos partidos entre regiones: si alguna opción del grupo se ancló acá,
   //    las etiquetas del grupo son legibles en esta región; entonces una opción
@@ -951,4 +970,109 @@ export function elegibilidadPorRegion(
   }
 
   return { porFila, sinMatch, exclusivas };
+}
+
+// ---------------------------------------------------------------------------
+// Corridas de cajas: el 1:N de las fechas partidas (v1.4.3 B0.2).
+//
+// Una fila de tipo fecha se pinta a veces en TRES cajas angostas y contiguas
+// (día / mes / año). En el CSC el representante legal tiene `#97` (w=22),
+// `#98` (w=22) y `#99` (w=31) en la misma línea, con huecos de 6,6 y 4,4pt.
+//
+// El DP ya sabía modelar el 1:N, pero nunca llegaba a evaluarlo: la fila
+// `Fecha de nacimiento` se ancla a la primera caja por su etiqueta impresa, y
+// las anclas son 1:1 por construcción, así que las otras dos quedaban huérfanas.
+// El arreglo es un POST-PASO sobre las anclas, no un cambio del DP.
+// ---------------------------------------------------------------------------
+
+/** ¿La col E de la fila declara una fecha? */
+export function esTipoFecha(tipo: string | undefined): boolean {
+  return /fecha|date/.test(slug(tipo ?? ''));
+}
+
+/** Ancho máximo de una caja para considerarla parte de una corrida. */
+const MAX_ANCHO_CORRIDA = 60;
+/** Hueco máximo entre dos cajas contiguas de la misma corrida. */
+const MAX_HUECO_CORRIDA = 20;
+
+/**
+ * Corrida de cajas que arranca en `desde`: `/Tx` angostas, misma línea, X
+ * creciente y sin etiqueta impresa propia entre ellas (si la segunda tuviera su
+ * propio rótulo sería otro campo, no la continuación del mismo dato).
+ */
+export function corridaDeWidgets(
+  leaves: PdfLeaf[],
+  disponibles: number[],
+  desde: number,
+  texto: TextItem[],
+  maximo = 4,
+): number[] {
+  const libres = new Set(disponibles);
+  const out = [desde];
+  let actual = leaves[desde];
+  if (!actual || actual.ft !== '/Tx' || actual.rect.w > MAX_ANCHO_CORRIDA) return out;
+
+  for (let j = desde + 1; j < leaves.length && out.length < maximo; j++) {
+    if (!libres.has(j)) break;
+    const sig = leaves[j];
+    if (sig.ft !== '/Tx') break;
+    if (sig.page !== actual.page) break;
+    if (Math.abs(sig.rect.y - actual.rect.y) > 2) break;
+    if (sig.rect.w > MAX_ANCHO_CORRIDA) break;
+    const hueco = sig.rect.x - (actual.rect.x + actual.rect.w);
+    if (hueco < -2 || hueco > MAX_HUECO_CORRIDA) break;
+    // Si la caja siguiente tiene su propio rótulo a la izquierda, es otro campo.
+    const e = etiquetasDeLeaf(sig, texto);
+    if (e.izq && e.izq !== etiquetasDeLeaf(actual, texto).izq) break;
+    out.push(j);
+    actual = sig;
+  }
+  return out;
+}
+
+/**
+ * Sufijos de una corrida derivados del formato de la fila. Si la col F trae un
+ * placeholder tipo `dd/mm/aaaa`, cada parte da su nombre; si trae un valor de
+ * ejemplo (`4/26/79`) no se puede saber el orden, así que se devuelve
+ * `undefined` y se usa el numérico `_1.._n`. Es editable en los dos casos.
+ */
+export function sufijosDeFormato(valor: string, n: number): string[] | undefined {
+  const partes = (valor ?? '').split(/[\/\-.]/).map((x) => x.trim().toLowerCase());
+  if (partes.length !== n) return undefined;
+  const nombre = (p: string): string | null => {
+    if (/^d+$/.test(p)) return 'dia';
+    if (/^m+$/.test(p)) return 'mes';
+    if (/^a+$/.test(p) || /^y+$/.test(p)) return 'ano';
+    return null;
+  };
+  const out = partes.map(nombre);
+  return out.every((x): x is string => !!x) ? out : undefined;
+}
+
+/**
+ * Extiende las anclas de fila-fecha sobre su corrida de cajas.
+ * Solo toca campos que estén libres (no anclados por otra fila).
+ */
+export function extenderAnclasEnCorridas(
+  anclas: Ancla[],
+  filas: FilaAncla[],
+  leaves: PdfLeaf[],
+  leafIdxs: number[],
+  texto: TextItem[],
+): Ancla[] {
+  const anclados = new Set(anclas.flatMap((a) => a.leafIdxs));
+  return anclas.map((a) => {
+    const f = filas.find((x) => x.idx === a.filaIdx);
+    if (!f || !esTipoFecha(f.tipo) || a.leafIdxs.length > 1) return a;
+    const libres = leafIdxs.filter((j) => !anclados.has(j) || j === a.leafIdxs[0]);
+    const corrida = corridaDeWidgets(leaves, libres, a.leafIdxs[0], texto);
+    if (corrida.length < 2) return a;
+    for (const j of corrida) anclados.add(j);
+    return {
+      ...a,
+      leafIdxs: corrida,
+      sufijos: sufijosDeFormato(f.valor, corrida.length),
+      motivo: `${a.motivo} · 1:N — fecha partida en ${corrida.length} cajas contiguas`,
+    };
+  });
 }

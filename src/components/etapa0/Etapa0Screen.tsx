@@ -13,6 +13,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { useStore } from '../../store/store';
+import { BADGE } from '../../version';
 import { Button } from '../ui';
 import { readFichaRaw, norm, type FichaRawResult, type RowDestino } from '../../lib/etapa0/fichaRaw';
 import { readPdfFields, type PdfFieldsResult } from '../../lib/etapa0/pdfFields';
@@ -296,6 +297,7 @@ export default function Etapa0Screen() {
         // de un grupo: es la misma señal con la que se armó el nombre.
         esOpcion: !!filasPdf[i].partes.sufijo,
         grupo: filasPdf[i].partes.base,
+        tipo: filasPdf[i].fila.tipo,
       }));
       const r = anclasDeTexto(fa, pdf.leaves, seg.leafIdxs, textoPdf);
       seg.anclas = r.anclas;
@@ -378,7 +380,12 @@ export default function Etapa0Screen() {
           if (next[li]?.manual) return;
           // En una relación 1:N cada caja necesita nombre propio; se numeran por
           // posición (estructural, no es desambiguación de colisión).
-          const nombre = propuesto && a.leafIdx.length > 1 ? `${propuesto}_${parte + 1}` : propuesto;
+          // En una relación 1:N cada caja necesita nombre propio. El sufijo sale
+          // del formato de la fila cuando se puede derivar (`dd/mm/aaaa` ->
+          // dia/mes/ano) y si no es posicional. Es estructural y editable, no
+          // desambiguación de colisión.
+          const sufijo = a.sufijos?.[parte] ?? String(parte + 1);
+          const nombre = propuesto && a.leafIdx.length > 1 ? `${propuesto}_${sufijo}` : propuesto;
           next[li] = {
             nombreNuevo: nombre,
             filaIdx: a.filaIdx,
@@ -769,7 +776,7 @@ export default function Etapa0Screen() {
         <span className="font-bold text-slate-800 flex items-center gap-1.5">
           <FileSignature size={16} /> Etapa 0 · Renombrado asistido
         </span>
-        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.4.2 · pantalla</span>
+        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">{BADGE}</span>
         <div className="flex-1" />
         <input ref={fichaInput} type="file" accept=".xlsx,.xls" hidden onChange={onFicha} />
         <input ref={pdfInput} type="file" accept="application/pdf,.pdf" hidden onChange={onPdf} />

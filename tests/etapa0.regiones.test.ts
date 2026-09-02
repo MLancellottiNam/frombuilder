@@ -17,6 +17,10 @@ import {
 import { alinear, alinearPorSegmentos, type Segmento } from '../src/lib/etapa0/align';
 import { slug } from '../src/lib/etapa0/acroName';
 import {
+  corridaDeWidgets,
+  extenderAnclasEnCorridas,
+  sufijosDeFormato,
+  esTipoFecha,
   elegibilidadPorRegion,
   textoDeRegion,
   claveApareceEnTexto,
@@ -211,7 +215,7 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       { idx: 3, nombrePdf: '1er Apellido', valor: 'Ulloa', esOpcion: false, grupo: '' },
     ];
     const r = anclasDeTexto(filas, ls, [0, 1, 2, 3], t);
-    const par = (f: number) => r.anclas.find((a) => a.filaIdx === f)?.leafIdx;
+    const par = (f: number) => r.anclas.find((a) => a.filaIdx === f)?.leafIdxs[0];
     ok(par(3) === 0, `"1er Apellido" ancla en el campo de texto (got ${par(3)})`);
     ok(par(0) === 2, `"DIMEX" ancla en su casilla (got ${par(0)})`);
     ok(par(1) === 3, `"Pasaporte" ancla en su casilla (got ${par(1)})`);
@@ -300,6 +304,54 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
     const conPen = alinear(filasP, lsP, { penalidad: 8, contradice: () => true });
     ok(conPen.asignaciones.length === 0, 'con la penalidad, el campo queda sin asignar en vez de mal asignado');
     ok(conPen.huerfanosPdf.length === 1 && conPen.huerfanosFicha.length === 1, 'y las dos puntas quedan visibles como huérfanas');
+  }
+
+  // --- B0.2: corridas de cajas (el 1:N de las fechas) ---------------------
+  {
+    // tres cajas angostas y contiguas en la misma línea, más una ancha aparte
+    const ls: PdfLeaf[] = [leaf(1, 0, 700), leaf(2, 0, 700), leaf(3, 0, 700), leaf(4, 0, 700)];
+    ls[0].rect = { x: 148, y: 675, w: 22, h: 12 };
+    ls[1].rect = { x: 177, y: 675, w: 22, h: 12 };
+    ls[2].rect = { x: 204, y: 675, w: 31, h: 12 };
+    ls[3].rect = { x: 300, y: 675, w: 120, h: 12 }; // ancha: no es parte
+    ls.forEach((l) => (l.widgets = [{ page: 0, rect: l.rect }]));
+    const t: TextItem[] = [ti('Fecha de nacimiento:', 0, 672, 61)];
+    const c = corridaDeWidgets(ls, [0, 1, 2, 3], 0, t);
+    ok(JSON.stringify(c) === '[0,1,2]', `la corrida son las 3 cajas angostas (got ${JSON.stringify(c)})`);
+    ok(corridaDeWidgets(ls, [0, 1, 2, 3], 3, t).length === 1, 'una caja ancha no arranca corrida');
+    ok(corridaDeWidgets(ls, [0], 0, t).length === 1, 'si las siguientes no están libres, la corrida es de uno');
+
+    // el placeholder "_____ / _____" NO cuenta como etiqueta propia
+    const conPlaceholder = [...t, ti('_____ / _____ /_______', 0, 672, 149)];
+    ok(
+      JSON.stringify(corridaDeWidgets(ls, [0, 1, 2, 3], 0, conPlaceholder)) === '[0,1,2]',
+      'un texto de solo guiones bajos no corta la corrida',
+    );
+    ok(etiquetasDeLeaf(ls[1], [ti('______', 0, 672, 100)]).izq === '', 'y tampoco se toma como etiqueta');
+
+    // sufijos derivados del formato
+    ok(JSON.stringify(sufijosDeFormato('dd/mm/aaaa', 3)) === '["dia","mes","ano"]', 'dd/mm/aaaa -> dia/mes/ano');
+    ok(sufijosDeFormato('4/26/79', 3) === undefined, 'un valor de ejemplo no dice el orden: sufijo posicional');
+    ok(sufijosDeFormato('dd/mm/aaaa', 2) === undefined, 'si la cantidad de partes no coincide, no se deriva');
+    ok(esTipoFecha('Fecha') && !esTipoFecha('Texto'), 'esTipoFecha lee la col E');
+
+    // extensión de la ancla
+    const filasF: FilaAncla[] = [
+      { idx: 0, nombrePdf: 'Fecha de Nacimiento', valor: '4/26/79', esOpcion: false, grupo: '', tipo: 'Fecha' },
+      { idx: 1, nombrePdf: 'Otro', valor: '', esOpcion: false, grupo: '', tipo: 'Texto' },
+    ];
+    const ext = extenderAnclasEnCorridas(
+      [{ filaIdx: 0, leafIdxs: [0], motivo: 'x' }],
+      filasF,
+      ls,
+      [0, 1, 2, 3],
+      t,
+    );
+    ok(JSON.stringify(ext[0].leafIdxs) === '[0,1,2]', `la ancla de fecha se extiende a las 3 cajas (got ${JSON.stringify(ext[0].leafIdxs)})`);
+    ok(/1:N/.test(ext[0].motivo), 'y el motivo lo dice');
+    // una fila que no es fecha no se extiende
+    const ext2 = extenderAnclasEnCorridas([{ filaIdx: 1, leafIdxs: [0], motivo: 'x' }], filasF, ls, [0, 1, 2, 3], t);
+    ok(ext2[0].leafIdxs.length === 1, 'una fila que no es de tipo fecha no se extiende');
   }
 
   // --- segmentos: tramos libres contiguos ----------------------------------
@@ -456,6 +508,7 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
         valor: filasPdf[i].fila.valor,
         esOpcion: !!filasPdf[i].partes.sufijo,
         grupo: filasPdf[i].partes.base,
+        tipo: filasPdf[i].fila.tipo,
       }));
       const ar = anclasDeTexto(fa, pdf.leaves, seg.leafIdxs, txt);
       seg.anclas = ar.anclas;
@@ -573,6 +626,32 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
       `CSC §A.4: «revisar» baja de 28 a <=5 (got ${porRegion.stats.revisar})`,
     );
 
+    // --- B0.2 sobre el CSC: la fecha del representante ocupa 3 cajas -------
+    {
+      const i97 = pdf.leaves.findIndex((l) => l.readingIndex === 97);
+      const a = porRegion.asignaciones.find((x) => x.leafIdx.includes(i97));
+      ok(!!a && a.leafIdx.length === 3, `CSC B0.2: la fecha de RPL toma 3 cajas (got ${a?.leafIdx.length ?? 0})`);
+      ok(!!a && /1:N/.test(a.motivos.join(' ')), 'CSC B0.2: el motivo dice que es 1:N');
+      ok(!!a && a.confianza !== 'alta', 'CSC B0.2: un 1:N no se autoconfirma en alta');
+      const nombres3 = a ? a.leafIdx.map((j) => fR[j].name) : [];
+      console.log('  fecha RPL en 3 cajas:', nombres3.join(', '));
+      ok(new Set(nombres3).size === 3, `CSC B0.2: las 3 cajas tienen nombre propio (got ${nombres3.join(', ')})`);
+    }
+    // Los tres "Detalle:" NO son recuperables: el PDF tiene dos campos rotulados
+    // "Detalle:" por región (domicilio nacional y extranjero) y la ficha ofrece
+    // una sola fila. Se documenta acá para que no se vuelva a intentar.
+    {
+      const filasDetalle = filasPdf.filter((n) => /^detalle$/.test(norm(n.fila.nombrePdf)) && n.fila.instancia?.codigo === 'ASG');
+      ok(filasDetalle.length === 1, `CSC: la ficha ofrece 1 sola fila «Detalle» por instancia (got ${filasDetalle.length})`);
+      const leavesDetalle = segsReal
+        .find((x) => x.etiqueta === 'ASG')!
+        .leafIdxs.filter((j) => /^detalle/.test(norm(etiquetaPreferida(pdf.leaves[j], etiquetasDeLeaf(pdf.leaves[j], txt))[0] ?? '')));
+      ok(
+        leavesDetalle.length === 2,
+        `CSC: pero el PDF tiene 2 campos rotulados «Detalle:» en ASG (got ${leavesDetalle.length}) — uno queda sin fila por diseño`,
+      );
+    }
+
     // §6 — criterios de éxito de v1.4.1
     ok(enP1(fR, 'rpl_') === 0, `CSC §6: 0 campos rpl_* en la página 1 (got ${enP1(fR, 'rpl_')}; el pase global daba ${enP1(fG, 'rpl_')})`);
     // v1.4.3: el filtro de elegibilidad baja los asignados a propósito. Antes
@@ -584,6 +663,13 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
     );
     console.log(
       `  huérfanos del PDF: ${porRegion.huerfanosPdf.length} -> ${porRegion.huerfanosPdf.map((j) => pdf.leaves[j].name.slice(0, 22)).join(', ')}`,
+    );
+    // El número real, no el que se escribió antes de que existiera el filtro:
+    // con la elegibilidad puesta ASG tiene 40 filas para 43 campos, así que hay
+    // un piso aritmético de huecos. Se fija en 13 y se vigila que no crezca.
+    ok(
+      porRegion.huerfanosPdf.length <= 13,
+      `CSC: a lo sumo 13 campos del PDF sin fila (got ${porRegion.huerfanosPdf.length})`,
     );
     ok(
       fR.filter((x) => x.name.startsWith('asg_')).every((x) => x.leaf.page === 0),
@@ -618,8 +704,8 @@ const ti = (str: string, page: number, y: number, x = 100, rotado = false): Text
     );
     ok(respaldadas.length >= 40, `CSC: >=40 asignaciones respaldadas por la etiqueta impresa (got ${respaldadas.length})`);
     ok(
-      respaldadas.every((a) => a.confianza === 'alta'),
-      'CSC: todas las respaldadas por la etiqueta impresa quedan en alta',
+      respaldadas.filter((a) => a.leafIdx.length === 1).every((a) => a.confianza === 'alta'),
+      'CSC: las respaldadas por la etiqueta impresa quedan en alta (salvo los 1:N, que se revisan)',
     );
     ok(porRegion.stats.revisar > 0, `CSC: quedan casos para revisar a mano (got ${porRegion.stats.revisar})`);
 

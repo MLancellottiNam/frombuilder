@@ -32,6 +32,8 @@ export interface FilaAlineable {
 
 export interface Asignacion {
   filaIdx: number;
+  /** sufijo por caja en una relación 1:N; si falta se numera `_1.._n` */
+  sufijos?: string[];
   /** 1..N campos del PDF (N>1 = relación 1:N, p.ej. fecha partida en día/mes/año) */
   leafIdx: number[];
   confianza: Confianza;
@@ -365,7 +367,7 @@ export interface Segmento {
    * segmento en tramos y el DP alinea solo los huecos. Sin esto el orden interno
    * del bloque —que en el CSC difiere entre ficha y PDF— desplaza todo.
    */
-  anclas?: { filaIdx: number; leafIdx: number; motivo: string }[];
+  anclas?: { filaIdx: number; leafIdxs: number[]; sufijos?: string[]; motivo: string }[];
   /**
    * Filas que NO deben competir por los campos de este segmento (opciones de un
    * grupo que vive en otra región). Van derecho a huérfanas de ficha.
@@ -423,16 +425,19 @@ export function alinearPorSegmentos(
     const filasAncladas = new Set<number>();
     const leavesAnclados = new Set<number>();
     for (const a of seg.anclas ?? []) {
-      if (!seg.filaIdxs.includes(a.filaIdx) || !seg.leafIdxs.includes(a.leafIdx)) continue;
-      if (filasAncladas.has(a.filaIdx) || leavesAnclados.has(a.leafIdx)) continue;
+      if (!seg.filaIdxs.includes(a.filaIdx)) continue;
+      const js = a.leafIdxs.filter((j) => seg.leafIdxs.includes(j) && !leavesAnclados.has(j));
+      if (js.length === 0 || filasAncladas.has(a.filaIdx)) continue;
       filasAncladas.add(a.filaIdx);
-      leavesAnclados.add(a.leafIdx);
+      for (const j of js) leavesAnclados.add(j);
       // La etiqueta impresa es la evidencia más fuerte que hay: confianza alta,
-      // sin recalcular por posición.
+      // sin recalcular por posición. Una corrida (1:N) sí se manda a revisar:
+      // el reparto por caja lo tiene que confirmar una persona.
       asignaciones.push({
         filaIdx: a.filaIdx,
-        leafIdx: [a.leafIdx],
-        confianza: 'alta',
+        leafIdx: js,
+        sufijos: a.sufijos,
+        confianza: js.length > 1 ? 'media' : 'alta',
         motivos: [a.motivo, `región «${seg.etiqueta}»`],
         score: MATCH_TIPO_OK + BOOST_TEXTO,
       });
