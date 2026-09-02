@@ -195,7 +195,7 @@ Cada ítem que falla es **clickeable** y selecciona el campo.
 - **Proyecto** (.json) para guardar/cargar todo el estado, e **Importar JSON** de un
   form-definition existente (preserva `_sourcePdf`, ids y `sourceMeta`).
 
-### 5.8 Etapa 0 — Renombrado asistido (v1.0.0 → v1.5.0, + v1.4.1)
+### 5.8 Etapa 0 — Renombrado asistido (v1.0.0 → v1.5.0, + v1.4.1 y v1.4.2)
 
 La ficha cruda del INS viene con la **col N vacía** y los AcroNames del PDF **mienten**
 (en el CSC `Profesión` es en realidad el Detalle del domicilio extranjero). Etapa 0 toma
@@ -216,10 +216,30 @@ Módulos (`src/lib/etapa0/`):
 | `writeFicha.ts` | reescribe el mismo `.xlsx` completando **solo la col N** de las filas que van al PDF (solo-JSON y excluidas quedan vacías). Además `detectarAvisosColM`: erratas de tipeo **genéricas** (grafía inconsistente, no-ASCII, mayúscula inicial, espacios, punto doble) — **se reportan, no se corrigen**. |
 | `reporte.ts` | CSV con asignados, huérfanos de los dos lados, colisiones, avisos de col M y la nota de ausencia de `/Sig`. |
 
-UI (`src/components/etapa0/`): `Etapa0Screen` (dos paneles + stats + panel de hand-off),
-`TablaCampos` (tabla editable centrada en el campo del PDF, con bulk edit y colisiones en
-rojo) y `PdfPreview` (render con `pdfjs-dist` + overlay clickeable, azul=alta,
-ámbar=media/revisar, rojo=colisión, gris=sin asignar).
+UI (`src/components/etapa0/`), reorganizada en **v1.4.2** para mostrar el resultado y no
+el razonamiento del motor:
+
+- `Etapa0Screen` arranca con un **resumen de tres líneas** (campos resueltos · necesitan
+  revisión · colisiones) más los tres botones de descarga. Nada más. Las colisiones y las
+  regiones sin sembrar suben al resumen como advertencia accionable, porque ahí sí hay que
+  intervenir.
+- **`Ver detalle`** (colapsado, y recuerda su estado en el proyecto) contiene todo el
+  diagnóstico sin perder nada: stats, tabla de la ficha, tabla de los 111 campos con su
+  bulk edit, instancias, regiones y sus avisos, filas sin campo y avisos de col M.
+- `ModoRevision` recorre de a uno **solo** los campos que necesitan atención
+  (media/revisar/sin asignar) con los mismos controles de la tabla, y el preview hace zoom
+  para que se lea la etiqueta impresa alrededor del campo. `Confirmar` saca el campo de la
+  lista (es estado de UI, no re-clasifica nada); `Saltar` avanza sin marcar.
+- El **hand-off** aparece recién al descargar el PDF renombrado, con los pasos que siguen.
+- `TablaCampos` (tabla editable centrada en el campo del PDF, con bulk edit y colisiones en
+  rojo) y `PdfPreview` (render con `pdfjs-dist` + overlay clickeable, azul=alta,
+  ámbar=media/revisar, rojo=colisión, gris=sin asignar, bandas de región de fondo).
+
+Sobre el conteo de filas sin campo: la alineación corre **solo** sobre las filas
+clasificadas como `pdf`, así que ninguna `solo-json` ni `excluida` entra nunca. De las 71
+que quedaban sin campo en el CSC, **70 son filas del bloque repetible que no aplican a su
+instancia** —el subset por geometría funcionando— y **1** es huérfana de verdad. Se muestran
+separadas: llamarlas todas «huérfanas» asustaba sin motivo.
 
 El hand-off es un checklist de 4 pasos y **“Continuar a Etapa 1” queda deshabilitado hasta
 descargar el PDF renombrado**: si el PDF entra a Signframe antes del renombrado, el

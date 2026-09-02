@@ -35,6 +35,7 @@ export default function PdfPreview({
   colisiones,
   regiones,
   regionPorLeaf,
+  escalaMinima,
 }: {
   file: File | null;
   leaves: PdfLeaf[];
@@ -50,6 +51,12 @@ export default function PdfPreview({
   regiones?: Region[];
   /** leafIdx -> código de instancia */
   regionPorLeaf?: Map<number, string>;
+  /**
+   * Zoom mínimo garantizado. El modo revisión lo sube para que se lea la
+   * etiqueta impresa alrededor del campo, que es lo que permite decidir de un
+   * vistazo si el nombre está bien.
+   */
+  escalaMinima?: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -160,6 +167,11 @@ export default function PdfPreview({
       cancelled = true;
     };
   }, [page, scale, pageCount, leaves, regiones]);
+
+  // Zoom mínimo pedido por el modo revisión.
+  useEffect(() => {
+    if (escalaMinima != null) setScale((s) => (s < escalaMinima ? escalaMinima : s));
+  }, [escalaMinima]);
 
   // Al seleccionar desde la tabla: saltar a su página y hacer scroll.
   useEffect(() => {
