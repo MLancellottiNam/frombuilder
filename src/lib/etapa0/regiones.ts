@@ -91,7 +91,16 @@ export interface BandaOpciones {
  * token del texto con el mismo prefijo de 5 caracteres. La ficha dice "Jurídico
  * Nacional" y el PDF "Jurídica Nacional": por prefijo matchea, por igualdad no.
  */
-export function valorMatcheaTexto(valor: string, texto: string): boolean {
+export interface OpcionesMatch {
+  /** fracción mínima de tokens del valor que tienen que aparecer (1 = todos) */
+  cobertura?: number;
+  /** tokens extra tolerados en el texto respecto del valor; `null` = sin tope */
+  maxExtra?: number | null;
+}
+
+export function valorMatcheaTexto(valor: string, texto: string, opts: OpcionesMatch = {}): boolean {
+  const cobertura = opts.cobertura ?? 1;
+  const maxExtra = opts.maxExtra === undefined ? 2 : opts.maxExtra;
   const tv = slug(valor).split('_').filter((t) => t.length >= 3);
   if (tv.length === 0) return false;
   const tt = slug(texto).split('_').filter(Boolean);
@@ -100,12 +109,37 @@ export function valorMatcheaTexto(valor: string, texto: string): boolean {
   // Sin este tope, el valor "Física" matchea la prosa "- Cuando no aplique una
   // sección (persona física o persona jurídica), debe trazarse una línea…" y
   // aparece una banda fantasma que rompe el conteo de instancias.
-  if (tt.length > tv.length + 2) return false;
-  return tv.every((v) => tt.some((t) => (v.length <= 5 ? t === v : t.slice(0, 5) === v.slice(0, 5))));
+  if (maxExtra != null && tt.length > tv.length + maxExtra) return false;
+  const hits = tv.filter((v) => tt.some((t) => (v.length <= 5 ? t === v : t.slice(0, 5) === v.slice(0, 5)))).length;
+  return hits / tv.length >= cobertura - 1e-9;
+}
+
+/**
+ * ¿La clave de una fila aparece impresa en alguno de estos fragmentos?
+ *
+ * Para claves LARGAS el match es por cobertura parcial y sin tope de longitud,
+ * porque pdfjs parte los textos largos: en el CSC la pregunta «¿Algún socio o
+ * beneficiario de la empresa desempeña…?» sale en dos fragmentos
+ * («…cargo político destacado (» + «), en territorio nacional…»), y el modo
+ * estricto la rechazaba entera. Para claves cortas se mantiene el modo estricto:
+ * ahí la cobertura parcial sería puro ruido.
+ */
+export const MIN_TOKENS_LAXO = 5;
+
+export function claveApareceEnTexto(clave: string, textos: TextItem[]): boolean {
+  const tv = slug(clave).split('_').filter((t) => t.length >= 3);
+  if (tv.length === 0) return false;
+  // La cobertura parcial es SOLO para etiquetas largas, las que pdfjs parte. En
+  // una clave corta cada token carga significado y aflojar miente: «País y lugar
+  // de constitución» tiene 3 tokens y con cobertura 0,6 matcheaba el impreso
+  // «País y lugar de nacimiento» (2 de 3), lo que la dejaba elegible en las tres
+  // regiones y devolvía el bug original en RPL.
+  const opts: OpcionesMatch = tv.length < MIN_TOKENS_LAXO ? {} : { cobertura: 0.6, maxExtra: null };
+  return textos.some((t) => !t.rotado && valorMatcheaTexto(clave, t.str, opts));
 }
 
 /** Valores demasiado cortos ("NO", "SI") generan ruido: no sirven como ancla. */
-function valorUtil(valor: string): boolean {
+export function valorUtil(valor: string): boolean {
   return slug(valor).replace(/_/g, '').length >= 4;
 }
 
@@ -410,16 +444,24 @@ export interface EtiquetaLeaf {
  */
 export function etiquetasDeLeaf(leaf: PdfLeaf, texto: TextItem[]): EtiquetaLeaf {
   const cy = leaf.rect.y + leaf.rect.h / 2;
-  const enLinea = texto.filter(
-    (t) => !t.rotado && t.page === leaf.page && Math.abs(t.y + 3 - cy) <= 9,
-  );
-  const izq = enLinea
-    .filter((t) => t.x + t.w <= leaf.rect.x + 4 && leaf.rect.x - (t.x + t.w) <= MAX_DIST_ETIQUETA)
-    .sort((a, b) => b.x + b.w - (a.x + a.w))[0];
-  const der = enLinea
-    .filter((t) => t.x >= leaf.rect.x - 4 && t.x - leaf.rect.x <= MAX_DIST_ETIQUETA)
-    .sort((a, b) => a.x - b.x)[0];
-  return { izq: izq?.str ?? '', der: der?.str ?? '' };
+  const buscar = (tol: number): EtiquetaLeaf => {
+    const enLinea = texto.filter((t) => !t.rotado && t.page === leaf.page && Math.abs(t.y + 3 - cy) <= tol);
+    const izq = enLinea
+      .filter((t) => t.x + t.w <= leaf.rect.x + 4 && leaf.rect.x - (t.x + t.w) <= MAX_DIST_ETIQUETA)
+      .sort((a, b) => b.x + b.w - (a.x + a.w))[0];
+    const der = enLinea
+      .filter((t) => t.x >= leaf.rect.x - 4 && t.x - leaf.rect.x <= MAX_DIST_ETIQUETA)
+      .sort((a, b) => a.x - b.x)[0];
+    return { izq: izq?.str ?? '', der: der?.str ?? '' };
+  };
+
+  const propia = buscar(9);
+  if (propia.izq || propia.der) return propia;
+  // A.3: si en su propia línea no hay candidato, mirar la de arriba y la de
+  // abajo. En el CSC `Lugar de Constitución.0.1` (p1 y=127) cae ENTRE dos filas
+  // del formulario y su rótulo no está en su línea; se repite en formularios
+  // densos, así que vale ampliar la ventana antes de darlo por huérfano.
+  return buscar(22);
 }
 
 /**
@@ -447,11 +489,14 @@ export interface AnclasResult {
   anclas: Ancla[];
   /**
    * Opciones de un grupo que NO pertenecen a esta región: el grupo tiene anclas
-   * acá (o sea su etiqueta impresa es legible) pero el valor de esta fila no
-   * aparece en ninguna etiqueta de la región. En el CSC "Tipo de Identificación"
-   * son 8 valores en la ficha y el PDF los reparte 5 (física, en ASG y RPL) y 4
-   * (jurídica, en PJR): las 3 sobrantes NO se fuerzan sobre las casillas ajenas,
-   * que es lo que ponía `institucion_autonoma` encima de "Pasaporte".
+   * acá pero el valor de esta fila no aparece en ninguna etiqueta de la región.
+   *
+   * OJO: desde v1.4.3 el filtro de `elegibilidadPorRegion` hace este trabajo
+   * mejor —mira TODO el texto de la región, no solo las etiquetas pegadas a los
+   * widgets— y sabe distinguir "vive en otra región" de "se llama distinto en el
+   * PDF". Esta lista NO se usa cuando hay elegibilidad calculada: marcaba como
+   * ajena a la opción «Física», que sí es de ASG pero está impresa como
+   * «Cédula», y la dejaba huérfana junto con su casilla.
    */
   opcionesForaneas: number[];
 }
@@ -468,6 +513,20 @@ export interface FilaAncla {
   esOpcion: boolean;
   /** identificador del grupo de opciones (el label); '' si no es opción */
   grupo: string;
+}
+
+/**
+ * Cuán específico es el match entre una clave y una etiqueta: fracción de
+ * tokens compartidos sobre el mayor de los dos conjuntos. «Ingresos Propios»
+ * contra "Ingresos propios" da 1; «Sin Ingresos propios» contra lo mismo da
+ * 0,67. Así el par exacto le gana al que solo lo contiene.
+ */
+export function especificidad(clave: string, etiqueta: string): number {
+  const a = slug(clave).split('_').filter((t) => t.length >= 3);
+  const b = slug(etiqueta).split('_').filter((t) => t.length >= 3);
+  if (a.length === 0 || b.length === 0) return 0;
+  const comunes = a.filter((t) => b.some((u) => u.slice(0, 5) === t.slice(0, 5))).length;
+  return comunes / Math.max(a.length, b.length);
 }
 
 /** Subsecuencia creciente más larga por `leafIdx` (las anclas deben ser monótonas). */
@@ -535,16 +594,45 @@ export function anclasDeTexto(
     }
   }
 
-  // 3) solo los mutuamente únicos: un match ambiguo no es evidencia
-  const candidatas: Ancla[] = [];
+  // 3) Resolución por ESPECIFICIDAD. Antes se exigía unicidad mutua estricta y
+  //    eso tiraba pares buenos: la etiqueta "Ingresos propios" matchea tanto la
+  //    fila «Ingresos Propios» como «Sin Ingresos propios», así que las dos
+  //    quedaban ambiguas y ninguna anclaba. Ahora gana la más específica y solo
+  //    se descarta el empate real.
+  const pares: { filaIdx: number; leafIdx: number; esp: number }[] = [];
   for (const [filaIdx, js] of porFila) {
-    if (js.length !== 1) continue;
-    const j = js[0];
-    if ((porLeaf.get(j) ?? []).length !== 1) continue;
-    const f = filas.find((x) => x.idx === filaIdx)!;
+    for (const j of js) {
+      const f = filas.find((x) => x.idx === filaIdx)!;
+      const clave = f.esOpcion ? f.valor : f.nombrePdf;
+      let mejor = 0;
+      for (const e of etiquetas.get(j) ?? []) mejor = Math.max(mejor, especificidad(clave, e));
+      pares.push({ filaIdx, leafIdx: j, esp: mejor });
+    }
+  }
+  pares.sort((a, b) => b.esp - a.esp);
+
+  const filasTomadas = new Set<number>();
+  const leavesTomados = new Set<number>();
+  const candidatas: Ancla[] = [];
+  for (let k = 0; k < pares.length; k++) {
+    const p = pares[k];
+    if (filasTomadas.has(p.filaIdx) || leavesTomados.has(p.leafIdx)) continue;
+    // Empate real para el mismo campo: no hay evidencia, se descarta.
+    const empate = pares.some(
+      (q, qi) =>
+        qi !== k &&
+        q.leafIdx === p.leafIdx &&
+        q.esp === p.esp &&
+        !filasTomadas.has(q.filaIdx) &&
+        q.filaIdx !== p.filaIdx,
+    );
+    if (empate) continue;
+    filasTomadas.add(p.filaIdx);
+    leavesTomados.add(p.leafIdx);
+    const f = filas.find((x) => x.idx === p.filaIdx)!;
     candidatas.push({
-      filaIdx,
-      leafIdx: j,
+      filaIdx: p.filaIdx,
+      leafIdx: p.leafIdx,
       motivo: `la etiqueta impresa del PDF coincide con ${f.esOpcion ? 'el valor (col F)' : 'el nombre (col C)'}`,
     });
   }
@@ -587,6 +675,12 @@ export function anclasDeTexto(
 export interface FilaSegmentable {
   /** código de instancia; null si la fila no pertenece al bloque repetible */
   codigo: string | null;
+  /**
+   * Regiones donde la fila es elegible. `null`/ausente = elegible en todas (es
+   * el caso de las filas sin match, el hueco de vocabulario). Si está y no
+   * incluye el código de la región, la fila NO se le ofrece a esa instancia.
+   */
+  elegibleEn?: string[] | null;
 }
 
 /** Corridas de índices consecutivos dentro de un conjunto. */
@@ -623,7 +717,12 @@ export function construirSegmentos(
       leafIdxs.push(j);
       usados.add(j);
     }
-    out.push({ etiqueta: r.codigo, filaIdxs: porCodigo.get(r.codigo) ?? [], leafIdxs });
+    // Solo las filas elegibles en ESTA región compiten por sus campos.
+    const filaIdxs = (porCodigo.get(r.codigo) ?? []).filter((k) => {
+      const e = filas[k].elegibleEn;
+      return e == null || e.includes(r.codigo);
+    });
+    out.push({ etiqueta: r.codigo, filaIdxs, leafIdxs });
   }
 
   // Filas libres, partidas por su posición respecto del bloque repetible.
@@ -665,6 +764,18 @@ export function construirSegmentos(
 
 // --- evidencia en contra ----------------------------------------------------
 
+/**
+ * ¿Dos labels de grupo son el mismo? Se acepta la contención porque pueden
+ * venir de columnas distintas de la ficha ("Tipo de Identificación" vs "Tipo de
+ * Identificación Persona").
+ */
+export function mismoGrupo(a: string, b: string): boolean {
+  const sa = slug(a);
+  const sb = slug(b);
+  if (!sa || !sb) return false;
+  return sa === sb || sa.startsWith(sb) || sb.startsWith(sa);
+}
+
 /** ¿El campo `j` cae dentro de la banda de algún grupo de opciones? */
 export function bandaDeLeaf(leaf: PdfLeaf, bandas: BandaOpciones[], tolerancia = 10): BandaOpciones | null {
   const cy = leaf.rect.y + leaf.rect.h / 2;
@@ -688,6 +799,27 @@ export interface EntradaEvidencia {
 }
 
 /**
+ * Evidencia PRECISA de que el par está mal: la etiqueta impresa del campo
+ * identifica a otra fila del mismo segmento. Sabemos de quién es ese campo, y no
+ * es de esta fila.
+ *
+ * Es la única que se usa como PENALIDAD dentro del DP (v1.4.3 A.2). La señal de
+ * banda es más gruesa: sirve para bajar la confianza a posteriori, pero como
+ * penalidad dura dejaba sin asignar campos que estaban bien —medido: 24
+ * huérfanos del PDF contra 3— y un campo sin asignar de más no compensa.
+ */
+export function evidenciaFuerte(e: EntradaEvidencia, filaIdx: number, leafIdx: number): string | null {
+  const leaf = e.leaves[leafIdx];
+  if (!leaf) return null;
+  const etq = etiquetaPreferida(leaf, etiquetasDeLeaf(leaf, e.texto))[0] ?? '';
+  if (!etq) return null;
+  const propia = e.claveDeFila(filaIdx);
+  if (valorMatcheaTexto(propia, etq)) return null;
+  const otra = e.filasDelSegmento(filaIdx).find((i) => i !== filaIdx && valorMatcheaTexto(e.claveDeFila(i), etq));
+  return otra === undefined ? null : `la etiqueta impresa «${etq}» corresponde a otra fila de la ficha`;
+}
+
+/**
  * Evidencia POSITIVA de que un par (fila, campo) está mal. Dos señales:
  *
  *  a) la etiqueta impresa del campo identifica a OTRA fila del mismo segmento:
@@ -700,20 +832,10 @@ export interface EntradaEvidencia {
  * el PDF imprime "Cédula", y eso es un hueco de vocabulario, no un error.
  */
 export function evidenciaEnContra(e: EntradaEvidencia, filaIdx: number, leafIdx: number): string | null {
+  const fuerte = evidenciaFuerte(e, filaIdx, leafIdx);
+  if (fuerte) return fuerte;
   const leaf = e.leaves[leafIdx];
   if (!leaf) return null;
-
-  // (a) la etiqueta impresa es de otra fila del segmento
-  const etq = etiquetaPreferida(leaf, etiquetasDeLeaf(leaf, e.texto))[0] ?? '';
-  if (etq) {
-    const propia = e.claveDeFila(filaIdx);
-    if (!valorMatcheaTexto(propia, etq)) {
-      const otra = e.filasDelSegmento(filaIdx).find((i) => i !== filaIdx && valorMatcheaTexto(e.claveDeFila(i), etq));
-      if (otra !== undefined) {
-        return `la etiqueta impresa «${etq}» corresponde a otra fila de la ficha`;
-      }
-    }
-  }
 
   // (b) el campo pertenece a la banda de otro grupo de opciones.
   //     Solo para CASILLAS: una caja de texto puede compartir la fila con las
@@ -722,10 +844,111 @@ export function evidenciaEnContra(e: EntradaEvidencia, filaIdx: number, leafIdx:
   const banda = leaf.ft === '/Btn' ? bandaDeLeaf(leaf, e.bandas) : null;
   if (banda) {
     const grupo = e.grupoDeFila(filaIdx);
-    if (slug(banda.label) !== slug(grupo)) {
+    // La comparación es por CONTENCIÓN, no por igualdad: el label de la banda y
+    // el de la fila pueden venir de columnas distintas de la ficha y no ser
+    // idénticos. En el CSC la banda dice "Tipo de Identificación Persona"
+    // (col D) y la fila "Tipo de Identificación" (col C). Exigir igualdad
+    // marcaba como ajena a TODA fila del grupo, y con la penalidad de A.2 eso
+    // pasó de bajar la confianza a impedir la asignación.
+    if (!mismoGrupo(banda.label, grupo)) {
       return `el campo está en la banda del grupo «${banda.label}» y esta fila no pertenece a ese grupo`;
     }
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Elegibilidad de filas por región (Parte A de v1.4.3).
+//
+// EL PROBLEMA. El bloque `personas` es genérico y se expande una vez por
+// instancia, así que ASG recibe las 59 filas, incluidas las que solo aplican a
+// Persona Jurídica. Y el DP prefiere asignar antes que dejar huérfanos: rellena
+// los huecos con lo que tenga a mano. Resultado en el CSC:
+// `asg_pais_y_lugar_de_constitucion` sobre "Estado Civil",
+// `asg_fecha_de_constitucion` sobre "Origen de los fondos".
+//
+// Acotar la GEOMETRÍA (las regiones) no alcanza: limita dónde puede caer una
+// fila, no impide que el DP la meta igual dentro de esa región.
+//
+// LA SOLUCIÓN. Una fila solo se le ofrece a una instancia si su clave aparece
+// IMPRESA dentro de la región de esa instancia. Medido sobre el CSC: de las 59
+// filas del bloque, 27 quedan exclusivas de una región, 22 siguen elegibles en
+// varias y 10 no matchean en ninguna.
+//
+// Las que no matchean en ninguna NO se eliminan: quedan elegibles en todas. Es
+// el hueco de vocabulario —la ficha dice «Física» donde el PDF imprime
+// «Cédula»— y perder campos por eso sería peor que el problema original.
+// ---------------------------------------------------------------------------
+
+/** Fragmentos de texto que caen dentro del rango vertical de una región. */
+export function textoDeRegion(
+  leaves: PdfLeaf[],
+  region: Region,
+  texto: TextItem[],
+  margen = 14,
+): TextItem[] {
+  const ls = leaves.slice(region.desdeLeaf, region.hastaLeaf + 1);
+  if (ls.length === 0) return [];
+  const paginas = new Set(ls.map((l) => l.page));
+  const min = Math.min(...ls.map((l) => l.rect.y));
+  const max = Math.max(...ls.map((l) => l.rect.y + l.rect.h));
+  return texto.filter((t) => !t.rotado && paginas.has(t.page) && t.y >= min - margen && t.y <= max + margen);
+}
+
+/** Lo que la elegibilidad necesita saber de una fila del bloque repetible. */
+export interface FilaElegibilidad {
+  /** identidad de la fila de ficha, SIN la instancia (`hoja|fila`) */
+  clave: string;
+  /** col C */
+  nombrePdf: string;
+  /** col F */
+  valor: string;
+  esOpcion: boolean;
+}
+
+export interface ElegibilidadResult {
+  /** `hoja|fila` -> códigos de región donde la fila aparece impresa */
+  porFila: Map<string, string[]>;
+  /** claves que no aparecen en ninguna región: elegibles en todas */
+  sinMatch: string[];
+  /** claves exclusivas de una sola región */
+  exclusivas: string[];
+}
+
+/**
+ * Para cada fila del bloque, en qué regiones aparece impresa su clave.
+ *
+ * La clave es el VALOR (col F) cuando la fila es una opción y ese valor sirve
+ * como señal; si no, la col C. Sin ese fallback, la pregunta «¿Algún socio o
+ * beneficiario…?» —cuyas opciones valen «NO» y «SI»— no matchea en ninguna
+ * región y sigue cayendo en ASG, que es uno de los cuatro errores del reporte.
+ */
+export function elegibilidadPorRegion(
+  leaves: PdfLeaf[],
+  regiones: Region[],
+  texto: TextItem[],
+  filas: FilaElegibilidad[],
+): ElegibilidadResult {
+  const textosPorRegion = new Map<string, TextItem[]>();
+  for (const r of regiones) textosPorRegion.set(r.codigo, textoDeRegion(leaves, r, texto));
+
+  const porFila = new Map<string, string[]>();
+  const sinMatch: string[] = [];
+  const exclusivas: string[] = [];
+  const vistas = new Set<string>();
+
+  for (const f of filas) {
+    if (vistas.has(f.clave)) continue;
+    vistas.add(f.clave);
+    const claveTexto = f.esOpcion && valorUtil(f.valor) ? f.valor : f.nombrePdf;
+    const donde = regiones
+      .filter((r) => claveApareceEnTexto(claveTexto, textosPorRegion.get(r.codigo) ?? []))
+      .map((r) => r.codigo);
+    porFila.set(f.clave, donde);
+    if (donde.length === 0) sinMatch.push(f.clave);
+    else if (donde.length === 1) exclusivas.push(f.clave);
+  }
+
+  return { porFila, sinMatch, exclusivas };
 }

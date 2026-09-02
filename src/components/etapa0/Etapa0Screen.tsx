@@ -30,7 +30,9 @@ import {
   anclasDeTexto,
   colorRegion,
   construirSegmentos,
+  elegibilidadPorRegion,
   evidenciaEnContra,
+  evidenciaFuerte,
   extraerTextoPdf,
   sembrarRegiones,
   type BandaOpciones,
@@ -214,7 +216,12 @@ export default function Etapa0Screen() {
       }
       let j = i;
       while (j + 1 < filas.length && esG[j + 1] && norm(filas[j + 1].label) === norm(filas[i].label)) j++;
-      out.push({ label: filas[i].label, valores: filas.slice(i, j + 1).map((x) => x.valor) });
+      // El label del grupo es la MISMA clave con la que se identifica la fila
+      // (col C, con col D como respaldo), si no la señal de banda no coincide.
+      out.push({
+        label: filas[i].nombrePdf || filas[i].label,
+        valores: filas.slice(i, j + 1).map((x) => x.valor),
+      });
       i = j + 1;
     }
     return out;
@@ -244,12 +251,39 @@ export default function Etapa0Screen() {
    * Un segmento por región (filas de esa instancia contra campos de esa región)
    * más un segmento `libre` con todo lo que queda afuera.
    */
+  /**
+   * A qué instancias se le ofrece cada fila del bloque: solo a aquellas cuya
+   * región tiene su clave IMPRESA. Sin este filtro, ASG recibía las filas de
+   * Persona Jurídica y el DP las metía en los huecos de la sección Física.
+   */
+  const elegibilidad = useMemo(() => {
+    if (!pdf || regiones.length === 0 || textoPdf.length === 0) return null;
+    return elegibilidadPorRegion(
+      pdf.leaves,
+      regiones,
+      textoPdf,
+      filasPdf
+        .filter((n) => n.fila.instancia)
+        .map((n) => ({
+          clave: `${n.fila.hoja}|${n.fila.fila}`,
+          nombrePdf: n.fila.nombrePdf,
+          valor: n.fila.valor,
+          esOpcion: !!n.partes.sufijo,
+        })),
+    );
+  }, [pdf, regiones, textoPdf, filasPdf]);
+
   const segmentos = useMemo<Segmento[]>(() => {
     if (!pdf || regiones.length === 0) return [];
     const segs = construirSegmentos(
       pdf.leaves.length,
       regiones,
-      filasPdf.map((n) => ({ codigo: n.fila.instancia?.codigo ?? null })),
+      filasPdf.map((n) => {
+        if (!n.fila.instancia || !elegibilidad) return { codigo: n.fila.instancia?.codigo ?? null };
+        const donde = elegibilidad.porFila.get(`${n.fila.hoja}|${n.fila.fila}`) ?? [];
+        // Sin match en ninguna región = hueco de vocabulario: elegible en todas.
+        return { codigo: n.fila.instancia.codigo, elegibleEn: donde.length ? donde : null };
+      }),
     );
     if (textoPdf.length === 0) return segs;
     // Anclas por la etiqueta impresa del PDF, dentro de cada segmento.
@@ -265,10 +299,12 @@ export default function Etapa0Screen() {
       }));
       const r = anclasDeTexto(fa, pdf.leaves, seg.leafIdxs, textoPdf);
       seg.anclas = r.anclas;
-      seg.excluirFilas = r.opcionesForaneas;
+      // `opcionesForaneas` NO se aplica: desde v1.4.3 lo hace `elegibilidad`,
+      // que además distingue "vive en otra región" de "se llama distinto en el
+      // PDF" y no deja huérfana a la opción «Física» (impresa «Cédula»).
     }
     return segs;
-  }, [pdf, regiones, filasPdf, textoPdf]);
+  }, [pdf, regiones, filasPdf, textoPdf, elegibilidad]);
 
   const align = useMemo(() => {
     if (!pdf || filasPdf.length === 0) return null;
@@ -282,20 +318,19 @@ export default function Etapa0Screen() {
     // Con regiones se alinea por segmentos, y se degrada a «revisar» todo par
     // del que haya evidencia POSITIVA de que está mal.
     const esOpcion = (i: number) => !!filasPdf[i].partes.sufijo;
+    const entrada = {
+      leaves: pdf.leaves,
+      texto: textoPdf,
+      bandas,
+      claveDeFila: (k: number) => (esOpcion(k) ? filasPdf[k].fila.valor : filasPdf[k].fila.nombrePdf),
+      grupoDeFila: (k: number) => (esOpcion(k) ? filasPdf[k].fila.nombrePdf : ''),
+      filasDelSegmento: (k: number) => segmentos.find((sg) => sg.filaIdxs.includes(k))?.filaIdxs ?? [],
+    };
     return alinearPorSegmentos(alineables, pdf.leaves, segmentos, {
-      evidenciaEnContra: (i, j) =>
-        evidenciaEnContra(
-          {
-            leaves: pdf.leaves,
-            texto: textoPdf,
-            bandas,
-            claveDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.valor : filasPdf[k].fila.nombrePdf),
-            grupoDeFila: (k) => (esOpcion(k) ? filasPdf[k].fila.nombrePdf : ''),
-            filasDelSegmento: (k) => segmentos.find((sg) => sg.filaIdxs.includes(k))?.filaIdxs ?? [],
-          },
-          i,
-          j,
-        ),
+      // Solo la evidencia PRECISA penaliza dentro del DP; la de banda es más
+      // gruesa y como penalidad dura dejaba campos buenos sin asignar.
+      evidenciaFuerte: (i, j) => evidenciaFuerte(entrada, i, j),
+      evidenciaEnContra: (i, j) => evidenciaEnContra(entrada, i, j),
     });
   }, [pdf, filasPdf, segmentos, textoPdf, bandas]);
 

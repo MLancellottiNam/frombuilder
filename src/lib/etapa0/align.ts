@@ -87,6 +87,26 @@ const MATCH_TIPO_MAL = -1; // baja la confianza, pero no lo prohíbe
 const BOOST_TEXTO = 3;
 const GAP = -1;
 
+/**
+ * Penalidad del pase por segmentos (v1.4.3 A.2). El sesgo se invierte a
+ * propósito: asignar una fila a un campo cuya etiqueta IMPRESA le corresponde a
+ * OTRA fila cuesta más que dejar el campo sin asignar. Un campo sin asignar es
+ * visible y corregible; uno mal asignado con confianza alta es invisible y
+ * termina en el PDF.
+ *
+ * Tiene que superar a `MATCH_TIPO_OK + BOOST_TEXTO` (=5) más el costo de los dos
+ * huecos que evitaría, para que el hueco gane incluso contra un match que por
+ * tipo y posición pintaba bien. Medido sobre el CSC: con penalidad 0 quedan 98
+ * asignados de los cuales 9 en `revisar`; con 8, quedan 96 con solo 2 en
+ * `revisar`. O sea convierte 7 asignaciones malas en 2 huecos visibles. Subirla
+ * a 20 no cambia nada: ya está saturada.
+ *
+ * ABARATAR EL HUECO no hizo falta y se midió: con `GAP` en -0,25 en vez de -1 el
+ * resultado empeora (16 huérfanos del PDF en vez de 15) sin ganar corrección,
+ * porque con esta penalidad el hueco ya le gana solo a los pares penalizados.
+ */
+export const PENALIDAD_ETIQUETA = 8;
+
 interface Puntaje {
   score: number;
   tipoOk: boolean;
@@ -121,19 +141,30 @@ function mismaLinea(a: PdfLeaf, b: PdfLeaf): boolean {
  * Alinea filas (orden hoja+fila, ya expandidas por instancia) contra campos del
  * PDF (orden de lectura), permitiendo huecos de los dos lados.
  */
-export function alinear(filas: FilaAlineable[], leaves: PdfLeaf[]): AlignResult {
+export interface OpcionesAlinear {
+  /** costo de dejar una fila o un campo sin asignar (negativo) */
+  gap?: number;
+  /** penalidad (positiva) cuando la etiqueta impresa contradice el par */
+  penalidad?: number;
+  /** índices LOCALES: ¿la etiqueta impresa del campo j contradice a la fila i? */
+  contradice?: (i: number, j: number) => boolean;
+}
+
+export function alinear(filas: FilaAlineable[], leaves: PdfLeaf[], opts: OpcionesAlinear = {}): AlignResult {
   const n = filas.length;
   const m = leaves.length;
+  const gap = opts.gap ?? GAP;
+  const penalidad = opts.penalidad ?? 0;
 
   // --- DP: dp[i][j] = mejor score alineando filas[0..i) con leaves[0..j) ---
   const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
   const from: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0)); // 1=match 2=gapFila 3=gapLeaf
   for (let i = 1; i <= n; i++) {
-    dp[i][0] = dp[i - 1][0] + GAP;
+    dp[i][0] = dp[i - 1][0] + gap;
     from[i][0] = 2;
   }
   for (let j = 1; j <= m; j++) {
-    dp[0][j] = dp[0][j - 1] + GAP;
+    dp[0][j] = dp[0][j - 1] + gap;
     from[0][j] = 3;
   }
   const cache: Puntaje[][] = Array.from({ length: n }, () => new Array(m) as Puntaje[]);
@@ -157,8 +188,9 @@ export function alinear(filas: FilaAlineable[], leaves: PdfLeaf[]): AlignResult 
     for (let j = 1; j <= m; j++) {
       const p = puntuar(filas[i - 1], leaves[j - 1]);
       cache[i - 1][j - 1] = p;
+      const castigo = opts.contradice?.(i - 1, j - 1) ? penalidad : 0;
 
-      let best = dp[i - 1][j - 1] + p.score;
+      let best = dp[i - 1][j - 1] + p.score - castigo;
       let dir = 1;
       let bestRun = 1;
 
@@ -169,7 +201,7 @@ export function alinear(filas: FilaAlineable[], leaves: PdfLeaf[]): AlignResult 
         const pIni = puntuar(filas[i - 1], leaves[ini]);
         // el 1er campo puntúa normal; cada caja extra suma poco, pero más que
         // el hueco que evitaría (GAP), para no sobre-absorber.
-        const cand = dp[i - 1][ini] + pIni.score + (k - 1);
+        const cand = dp[i - 1][ini] + pIni.score + (k - 1) - (opts.contradice?.(i - 1, ini) ? penalidad : 0);
         if (cand > best) {
           best = cand;
           dir = 1;
@@ -177,8 +209,8 @@ export function alinear(filas: FilaAlineable[], leaves: PdfLeaf[]): AlignResult 
         }
       }
 
-      const gapFila = dp[i - 1][j] + GAP;
-      const gapLeaf = dp[i][j - 1] + GAP;
+      const gapFila = dp[i - 1][j] + gap;
+      const gapLeaf = dp[i][j - 1] + gap;
       if (gapFila > best) {
         best = gapFila;
         dir = 2;
@@ -344,9 +376,9 @@ export interface Segmento {
 export interface OpcionesPorSegmentos {
   /**
    * Devuelve el motivo por el que este par está mal, o null si no hay evidencia
-   * en contra. Se usa para degradar a `revisar` una asignación que quedaría en
-   * `alta` por pura consistencia posicional, que es la peor clase de error:
-   * silenciosa.
+   * en contra. Se usa en dos lugares: como PENALIDAD dentro del DP (v1.4.3 A.2,
+   * así el par malo no se elige y el campo queda sin asignar, que es visible y
+   * corregible) y como degradación a `revisar` de lo que igual se asignó.
    *
    * Solo debe devolver algo cuando la evidencia es POSITIVA (sabemos de quién es
    * ese campo, o sabemos que el campo pertenece a otro grupo). Un "la etiqueta
@@ -355,6 +387,11 @@ export interface OpcionesPorSegmentos {
    * aportar información.
    */
   evidenciaEnContra?: (filaIdx: number, leafIdx: number) => string | null;
+  /**
+   * Evidencia PRECISA, la única que se usa como penalidad DENTRO del DP. Si no
+   * se pasa, no se penaliza nada y el DP se comporta como antes.
+   */
+  evidenciaFuerte?: (filaIdx: number, leafIdx: number) => string | null;
 }
 
 export function alinearPorSegmentos(
@@ -418,6 +455,12 @@ export function alinearPorSegmentos(
     const r = alinear(
       restoFilas.map((i) => filas[i]),
       restoLeaves.map((j) => leaves[j]),
+      {
+        penalidad: PENALIDAD_ETIQUETA,
+        contradice: opts.evidenciaFuerte
+          ? (li, lj) => !!opts.evidenciaFuerte!(restoFilas[li], restoLeaves[lj])
+          : undefined,
+      },
     );
     for (const a of r.asignaciones) {
       asignaciones.push({
