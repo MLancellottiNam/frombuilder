@@ -160,20 +160,20 @@ export default function Home() {
         <div className="mt-6">
           <EtapaCard
             n="0"
-            titulo="Renombrado asistido"
+            titulo="Campos del PDF"
             icon={<FileSignature size={15} />}
             badge={BADGE}
             destacada
-            necesita="Ficha cruda del INS (col N vacía) + PDF crudo"
-            produce="PDF renombrado + ficha con la col N llena + reporte CSV"
-            comoSeUsa="Adentro: alineación por región, revisión campo por campo, y crear / borrar / trocear campos del PDF."
-            cta={etapa0 ? 'Retomar el renombrado' : 'Empezar el renombrado'}
+            necesita="Solo el PDF crudo (la ficha es opcional)"
+            produce="PDF renombrado + PDF con los nombres impresos + paquete de campos (xlsx)"
+            comoSeUsa="Adentro: detectar campos, editarlos (nombre, tipo, caja, crear / borrar / trocear) y exportar el paquete. El mapeo se resuelve afuera y vuelve por «Cargar nombres»."
+            cta={etapa0 ? 'Retomar' : 'Empezar por el PDF'}
             onClick={() => setView('etapa0')}
           />
           {etapa0 && (
             <p className="text-[11px] text-slate-400 mt-1.5">
-              Hay un renombrado guardado{etapa0.pdfNombre ? ` de «${etapa0.pdfNombre}»` : ''}. Volvé a adjuntar la
-              ficha y el PDF para retomarlo.
+              Hay trabajo guardado{etapa0.pdfNombre ? ` sobre «${etapa0.pdfNombre}»` : ''}. Volvé a adjuntar el PDF
+              para retomarlo.
             </p>
           )}
         </div>

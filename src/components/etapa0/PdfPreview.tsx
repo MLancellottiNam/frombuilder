@@ -71,7 +71,7 @@ export default function PdfPreview({
   leaves,
   selected,
   onSelect,
-  confianza,
+  renombrado,
   nombreFinal,
   colisiones,
   regiones,
@@ -85,8 +85,12 @@ export default function PdfPreview({
   leaves: PdfLeaf[];
   selected: string | null;
   onSelect: (name: string) => void;
-  /** leafName -> confianza de la pre-alineación (pinta el overlay) */
-  confianza?: Map<string, string>;
+  /**
+   * Nombres ACTUALES de los campos que ya tienen nombre nuevo. Es lo único que
+   * el overlay necesita pintar distinto desde v2.0.0: antes era la confianza de
+   * la alineación automática, que ya no existe.
+   */
+  renombrado?: Set<string>;
   /** leafName(actual) -> nombre final que va a escribirse */
   nombreFinal?: Map<string, string>;
   /** nombres finales duplicados: se pintan en rojo y bloquean la descarga */
@@ -472,12 +476,11 @@ export default function PdfPreview({
         data-leyenda
       >
         <span className="text-slate-400">Colores:</span>
-        <Muestra clase="border-blue-500/80 bg-blue-500/15">listo</Muestra>
-        <Muestra clase="border-amber-500/80 bg-amber-500/20">revisar</Muestra>
-        <Muestra clase="border-slate-400/70 bg-slate-400/10">sin fila</Muestra>
+        <Muestra clase="border-blue-500/80 bg-blue-500/15">con nombre nuevo</Muestra>
+        <Muestra clase="border-slate-400/70 bg-slate-400/10">sin nombre nuevo</Muestra>
         <Muestra clase="border-red-500 bg-red-500/25">nombre repetido</Muestra>
         <Muestra clase="border-2 border-dashed border-slate-500">creado a mano</Muestra>
-        <span className="text-slate-400">· click en una caja = abre ese campo</span>
+        <span className="text-slate-400">· click abre el campo · arrastrá para mover</span>
       </div>
 
       {error && <p className="text-xs text-red-600 p-3">No se pudo renderizar: {error}</p>}
@@ -532,26 +535,20 @@ export default function PdfPreview({
           )}
           {boxes.map((b, i) => {
             const isSel = b.leaf.name === selected;
-            // alta=azul · media/revisar=ámbar · sin asignar=gris
-            const conf = confianza?.get(b.leaf.name);
+            // con nombre nuevo = azul · sin nombre = gris · repetido = rojo
+            const tieneNombre = renombrado?.has(b.leaf.name) ?? false;
             const final = nombreFinal?.get(b.leaf.name) ?? b.leaf.name;
             const choca = colisiones?.has(final) ?? false;
             const tono = choca
               ? 'border-red-500 bg-red-500/25 hover:bg-red-500/35'
-              :
-              conf === 'alta'
+              : tieneNombre
                 ? 'border-blue-500/80 bg-blue-500/15 hover:bg-blue-500/25'
-                : conf === 'media' || conf === 'revisar'
-                  ? 'border-amber-500/80 bg-amber-500/20 hover:bg-amber-500/30'
-                  : 'border-slate-400/70 bg-slate-400/10 hover:bg-slate-400/20';
+                : 'border-slate-400/70 bg-slate-400/10 hover:bg-slate-400/20';
             const tonoBadge = choca
               ? 'bg-red-600 text-white'
-              :
-              conf === 'alta'
+              : tieneNombre
                 ? 'bg-blue-100 text-blue-800'
-                : conf === 'media' || conf === 'revisar'
-                  ? 'bg-amber-100 text-amber-800'
-                  : 'bg-slate-200 text-slate-600';
+                : 'bg-slate-200 text-slate-600';
             // Mientras se arrastra, la caja se dibuja donde va a quedar.
             const enArrastre =
               arrastre && arrastre.box.leaf.name === b.leaf.name && arrastre.box.widgetIdx === b.widgetIdx;
