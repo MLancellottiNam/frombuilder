@@ -1,16 +1,47 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Plus, ZoomIn, ZoomOut } from 'lucide-react';
-import type { PdfLeaf } from '../../lib/etapa0/pdfFields';
+import type { PdfLeaf, Rect } from '../../lib/etapa0/pdfFields';
 import { colorRegion, type Region } from '../../lib/etapa0/regiones';
+import { moverRect, redimensionarRect, type Handle } from '../../lib/etapa0/rects';
 
 /** Overlay ya proyectado a píxeles del canvas. */
 interface Box {
   leaf: PdfLeaf;
+  /** índice del widget dentro del campo: un campo puede tener varias cajas */
+  widgetIdx: number;
   left: number;
   top: number;
   width: number;
   height: number;
 }
+
+/**
+ * Arrastre en curso sobre una caja: mover el campo entero o estirar un borde.
+ * El delta se mide en píxeles de pantalla y se traduce a puntos PDF con el
+ * viewport, así que no depende del zoom (ni de una página rotada).
+ */
+interface Arrastre {
+  tipo: 'mover' | Handle;
+  box: Box;
+  x0: number;
+  y0: number;
+  dx: number;
+  dy: number;
+  /** un click sin desplazamiento es una selección, no una edición */
+  movido: boolean;
+}
+
+/** Los 8 tiradores, en el orden en que se dibujan. */
+const HANDLES: { h: Handle; cx: number; cy: number; cursor: string }[] = [
+  { h: 'nw', cx: 0, cy: 0, cursor: 'nwse-resize' },
+  { h: 'n', cx: 0.5, cy: 0, cursor: 'ns-resize' },
+  { h: 'ne', cx: 1, cy: 0, cursor: 'nesw-resize' },
+  { h: 'e', cx: 1, cy: 0.5, cursor: 'ew-resize' },
+  { h: 'se', cx: 1, cy: 1, cursor: 'nwse-resize' },
+  { h: 's', cx: 0.5, cy: 1, cursor: 'ns-resize' },
+  { h: 'sw', cx: 0, cy: 1, cursor: 'nesw-resize' },
+  { h: 'w', cx: 0, cy: 0.5, cursor: 'ew-resize' },
+];
 
 /** Banda de fondo de una región, proyectada a píxeles del canvas. */
 interface Banda {
@@ -47,6 +78,7 @@ export default function PdfPreview({
   regionPorLeaf,
   escalaMinima,
   onDibujar,
+  onEditarRect,
   esCreado,
 }: {
   file: File | null;
@@ -69,6 +101,12 @@ export default function PdfPreview({
    * dibujo no está disponible.
    */
   onDibujar?: (page: number, rect: { x: number; y: number; w: number; h: number }) => void;
+  /**
+   * v2.0.0: mover o redimensionar la caja de un campo. Llega el rect ya en
+   * coordenadas PDF y el índice del widget dentro del campo (un campo puede
+   * tener varias cajas y se edita la que se arrastró, no todas).
+   */
+  onEditarRect?: (leaf: PdfLeaf, widgetIdx: number, rect: Rect) => void;
   /** distintivo de los campos creados a mano: borde punteado */
   esCreado?: (leafName: string) => boolean;
   /**
@@ -87,6 +125,8 @@ export default function PdfPreview({
   const [boxes, setBoxes] = useState<Box[]>([]);
   const [bandas, setBandas] = useState<Banda[]>([]);
   const [dibujando, setDibujando] = useState(false);
+  const [arrastre, setArrastre] = useState<Arrastre | null>(null);
+  const arrastreRef = useRef<Arrastre | null>(null);
   /** rect en píxeles del canvas mientras se arrastra */
   const [trazo, setTrazo] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const viewportRef = useRef<any>(null);
@@ -157,6 +197,7 @@ export default function PdfPreview({
           const [x2, y2] = viewport.convertToViewportPoint(w.rect.x + w.rect.w, w.rect.y + w.rect.h);
           out.push({
             leaf,
+            widgetIdx: leaf.widgets.indexOf(w),
             left: Math.min(x1, x2),
             top: Math.min(y1, y2),
             width: Math.abs(x2 - x1),
@@ -223,19 +264,105 @@ export default function PdfPreview({
   // otra página, el `setPage` de arriba no alcanza a renderizar la caja en el
   // mismo tick y el scroll se perdía. Al depender de `boxes` corre recién
   // cuando la caja existe, así que el salto entre páginas también centra.
+  //
+  // Pero `boxes` también cambia al EDITAR la geometría, y ahí re-centrar es
+  // molesto: la página salta abajo del puntero mientras se arrastra. Así que se
+  // scrollea una sola vez por (campo, página).
+  const scrollHecho = useRef('');
   useEffect(() => {
     if (!selected) return;
+    const clave = `${selected}@${page}`;
+    if (scrollHecho.current === clave) return;
     const el = wrapRef.current?.querySelector<HTMLElement>(`[data-box="${CSS.escape(selected)}"]`);
+    if (!el) return;
+    scrollHecho.current = clave;
     // Vertical al centro, horizontal lo mínimo: centrar en X corría la página y
     // dejaba fuera la etiqueta impresa a la izquierda del campo, que es
     // justamente lo que hay que leer para decidir si el nombre está bien.
-    el?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
-  }, [selected, boxes]);
+    el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+  }, [selected, boxes, page]);
 
   // A.2: si el campo seleccionado tiene widgets en varias páginas, avisarlo.
   // Todos sus widgets se resaltan; los de otra página no se ven en este canvas.
   const selLeaf = selected ? leaves.find((l) => l.name === selected) : undefined;
   const selMultiPagina = selLeaf && selLeaf.paginas.length > 1 ? selLeaf.paginas.map((x) => x + 1) : null;
+
+  // --- v2.0.0: mover y redimensionar la caja de un campo -------------------
+
+  /** Delta del arrastre en puntos PDF. Sale del viewport, así que el zoom (y
+   * una página rotada) no lo afectan. */
+  const deltaPdf = (dx: number, dy: number): [number, number] => {
+    const vp = viewportRef.current;
+    if (!vp) return [0, 0];
+    const [x0, y0] = vp.convertToPdfPoint(0, 0);
+    const [x1, y1] = vp.convertToPdfPoint(dx, dy);
+    return [x1 - x0, y1 - y0];
+  };
+
+  /** El rect que tendría el widget si el arrastre terminara ahora. */
+  const rectArrastrado = (a: Arrastre): Rect => {
+    const base = a.box.leaf.widgets[a.box.widgetIdx]?.rect ?? a.box.leaf.rect;
+    const [dx, dy] = deltaPdf(a.dx, a.dy);
+    return a.tipo === 'mover' ? moverRect(base, dx, dy) : redimensionarRect(base, a.tipo, dx, dy);
+  };
+
+  /** Ese mismo rect proyectado a píxeles del canvas, para el fantasma. */
+  const cajaArrastrada = (a: Arrastre) => {
+    const vp = viewportRef.current;
+    const r = rectArrastrado(a);
+    if (!vp) return null;
+    const [x1, y1] = vp.convertToViewportPoint(r.x, r.y);
+    const [x2, y2] = vp.convertToViewportPoint(r.x + r.w, r.y + r.h);
+    return {
+      left: Math.min(x1, x2),
+      top: Math.min(y1, y2),
+      width: Math.abs(x2 - x1),
+      height: Math.abs(y2 - y1),
+    };
+  };
+
+  const iniciarArrastre = (e: React.MouseEvent, box: Box, tipo: 'mover' | Handle) => {
+    if (dibujando || !onEditarRect) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const a: Arrastre = { tipo, box, x0: e.clientX, y0: e.clientY, dx: 0, dy: 0, movido: false };
+    arrastreRef.current = a;
+    setArrastre(a);
+  };
+
+  // Los listeners van en `window` y no en la caja: si el puntero se sale del
+  // widget a mitad del arrastre —lo normal al agrandar— el drag no se corta.
+  const arrastrando = arrastre !== null;
+  useEffect(() => {
+    if (!arrastrando) return;
+    const mover = (ev: MouseEvent) => {
+      const a = arrastreRef.current;
+      if (!a) return;
+      const dx = ev.clientX - a.x0;
+      const dy = ev.clientY - a.y0;
+      const next = { ...a, dx, dy, movido: a.movido || Math.abs(dx) > 2 || Math.abs(dy) > 2 };
+      arrastreRef.current = next;
+      setArrastre(next);
+    };
+    const soltar = () => {
+      const a = arrastreRef.current;
+      arrastreRef.current = null;
+      setArrastre(null);
+      if (!a) return;
+      // Sin desplazamiento fue un click: seleccionar, no editar.
+      if (!a.movido) {
+        onSelect(a.box.leaf.name);
+        return;
+      }
+      onEditarRect?.(a.box.leaf, a.box.widgetIdx, rectArrastrado(a));
+    };
+    window.addEventListener('mousemove', mover);
+    window.addEventListener('mouseup', soltar);
+    return () => {
+      window.removeEventListener('mousemove', mover);
+      window.removeEventListener('mouseup', soltar);
+    };
+  }, [arrastrando]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Convierte el trazo (píxeles del canvas) a coordenadas PDF. */
   const trazoAPdf = (t: { x0: number; y0: number; x1: number; y1: number }) => {
@@ -425,23 +552,33 @@ export default function PdfPreview({
                 : conf === 'media' || conf === 'revisar'
                   ? 'bg-amber-100 text-amber-800'
                   : 'bg-slate-200 text-slate-600';
+            // Mientras se arrastra, la caja se dibuja donde va a quedar.
+            const enArrastre =
+              arrastre && arrastre.box.leaf.name === b.leaf.name && arrastre.box.widgetIdx === b.widgetIdx;
+            const fantasma = enArrastre ? cajaArrastrada(arrastre!) : null;
+            const geo = fantasma ?? { left: b.left, top: b.top, width: b.width, height: b.height };
+            const editable = !!onEditarRect && !dibujando;
             return (
-              <button
+              <div
                 key={i}
                 data-box={b.leaf.name}
+                data-widget={b.widgetIdx}
                 title={
-                `#${b.leaf.readingIndex} · ${b.leaf.name} · ${b.leaf.ft}` +
-                (regionPorLeaf?.get(b.leaf.readingIndex - 1)
-                  ? ` · región ${regionPorLeaf.get(b.leaf.readingIndex - 1)}`
-                  : '')
-              }
-                onClick={() => onSelect(b.leaf.name)}
+                  `#${b.leaf.readingIndex} · ${b.leaf.name} · ${b.leaf.ft}` +
+                  (b.leaf.widgets.length > 1 ? ` · caja ${b.widgetIdx + 1} de ${b.leaf.widgets.length}` : '') +
+                  (editable ? ' · arrastrá para mover, los tiradores para redimensionar' : '') +
+                  (regionPorLeaf?.get(b.leaf.readingIndex - 1)
+                    ? ` · región ${regionPorLeaf.get(b.leaf.readingIndex - 1)}`
+                    : '')
+                }
+                onMouseDown={(e) => (editable ? iniciarArrastre(e, b, 'mover') : undefined)}
+                onClick={() => (editable ? undefined : onSelect(b.leaf.name))}
                 className={`absolute transition-colors ${
                   esCreado?.(b.leaf.name) ? 'border-2 border-dashed' : 'border'
                 } ${isSel ? 'border-brand-600 bg-brand-500/30 ring-1 ring-brand-600' : tono} ${
-                  dibujando ? 'pointer-events-none' : ''
+                  dibujando ? 'pointer-events-none' : editable ? 'cursor-move' : 'cursor-pointer'
                 }`}
-                style={{ left: b.left, top: b.top, width: b.width, height: b.height }}
+                style={{ left: geo.left, top: geo.top, width: geo.width, height: geo.height }}
               >
                 <span
                   className={`absolute left-0 -top-[13px] whitespace-nowrap rounded px-1 text-[9px] leading-[13px] font-mono ${
@@ -450,7 +587,25 @@ export default function PdfPreview({
                 >
                   {b.leaf.readingIndex}. {final}
                 </span>
-              </button>
+                {/* Tiradores: solo en el campo seleccionado, para no llenar la
+                    pantalla de cuadraditos en un formulario de 111 campos. */}
+                {isSel &&
+                  editable &&
+                  HANDLES.map((hh) => (
+                    <span
+                      key={hh.h}
+                      data-handle={hh.h}
+                      onMouseDown={(e) => iniciarArrastre(e, b, hh.h)}
+                      style={{
+                        position: 'absolute',
+                        left: `calc(${hh.cx * 100}% - 3px)`,
+                        top: `calc(${hh.cy * 100}% - 3px)`,
+                        cursor: hh.cursor,
+                      }}
+                      className="w-[7px] h-[7px] bg-white border border-brand-600 rounded-sm"
+                    />
+                  ))}
+              </div>
             );
           })}
         </div>

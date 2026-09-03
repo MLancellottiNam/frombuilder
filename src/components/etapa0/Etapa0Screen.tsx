@@ -17,7 +17,7 @@ import { useStore } from '../../store/store';
 import { BADGE } from '../../version';
 import { Button } from '../ui';
 import { readFichaRaw, norm, type FichaRawResult, type RowDestino } from '../../lib/etapa0/fichaRaw';
-import { readPdfFields, type PdfFieldsResult } from '../../lib/etapa0/pdfFields';
+import { readPdfFields, type PdfFieldsResult, type PdfLeaf as PdfLeafTipo } from '../../lib/etapa0/pdfFields';
 import {
   detectarBloquesInstanciables,
   instanciasPorDefecto,
@@ -57,6 +57,7 @@ import {
   type CampoCreado,
 } from '../../lib/etapa0/camposManuales';
 import { sufijosDeFormato } from '../../lib/etapa0/regiones';
+import { aplicarRects, claveRect, paraEscritura, type RectsEditados } from '../../lib/etapa0/rects';
 import TablaCampos, { nombreEfectivo, type Ediciones } from './TablaCampos';
 import ModoRevision from './ModoRevision';
 import PanelCampo from './PanelCampo';
@@ -187,6 +188,8 @@ export default function Etapa0Screen() {
   const [creados, setCreados] = useState<CampoCreado[]>([]);
   const [borrados, setBorrados] = useState<string[]>([]);
   const [dibujo, setDibujo] = useState<{ page: number; rect: { x: number; y: number; w: number; h: number } } | null>(null);
+  /** v2.0.0: geometría editada a mano, por `claveEstable#widget` del ORIGINAL */
+  const [rectsEditados, setRectsEditados] = useState<RectsEditados>({});
 
   const onFicha = async () => {
     const f = fichaInput.current?.files?.[0];
@@ -241,9 +244,12 @@ export default function Etapa0Screen() {
    * Lista EFECTIVA de campos: detectados − borrados + creados, reordenada por
    * orden de lectura. Es la que ve la UI, la que se alinea y la que se escribe.
    */
+  // Los rects editados se aplican ANTES de `aplicarCambios` para que el
+  // reordenamiento por orden de lectura vea la posición nueva: un campo que se
+  // movió tiene que aparecer donde está, no donde estaba.
   const cambios = useMemo(
-    () => (pdf ? aplicarCambios(pdf.leaves, creados, borrados) : null),
-    [pdf, creados, borrados],
+    () => (pdf ? aplicarCambios(aplicarRects(pdf.leaves, rectsEditados), creados, borrados) : null),
+    [pdf, creados, borrados, rectsEditados],
   );
   const leaves = cambios?.efectivos ?? [];
 
@@ -505,6 +511,22 @@ export default function Etapa0Screen() {
     setDescargas((x) => ({ ...x, pdf: false }));
   };
 
+  /**
+   * Mueve o redimensiona la caja de un campo. Un campo creado lleva su rect en
+   * su propia definición (su identidad es el `uid`); uno detectado va a
+   * `rectsEditados`, con la clave calculada sobre la lista ORIGINAL.
+   */
+  const editarRect = (leaf: PdfLeafTipo, widgetIdx: number, rect: { x: number; y: number; w: number; h: number }) => {
+    if (leaf.origen === 'creado' && leaf.uid) {
+      setCreados((prev) => prev.map((c) => (c.uid === leaf.uid ? { ...c, rect } : c)));
+    } else {
+      const original = pdf?.leaves.find((l) => l.name === leaf.name);
+      if (!original) return;
+      setRectsEditados((prev) => ({ ...prev, [claveRect(original, widgetIdx)]: rect }));
+    }
+    setDescargas((x) => ({ ...x, pdf: false }));
+  };
+
   /** Mueve un borde de región a mano. Queda marcada como `manual` y no se pisa. */
   const moverRegion = (i: number, campo: 'desdeLeaf' | 'hastaLeaf', valor: number) =>
     setRegiones((prev) =>
@@ -759,6 +781,7 @@ export default function Etapa0Screen() {
         tamanoFuente,
         creados: creadosFinales,
         borrados,
+        rects: pdf ? paraEscritura(pdf.leaves, rectsEditados) : undefined,
       });
       descargarBytes(r.bytes, `${baseNombre}-renombrado.pdf`, 'application/pdf');
       setDescargas((d) => ({ ...d, pdf: true }));
@@ -766,6 +789,7 @@ export default function Etapa0Screen() {
         `PDF escrito: ${r.renombrados} de ${r.campos} campos renombrados, ${r.limpiados} con valor borrado` +
           (r.creados ? `, ${r.creados} creados` : '') +
           (r.borrados ? `, ${r.borrados} borrados` : '') +
+          (r.movidos ? `, ${r.movidos} movidos` : '') +
           '.' +
           (r.warnings.length ? ' · ' + r.warnings.join(' · ') : ''),
       );
@@ -866,6 +890,7 @@ export default function Etapa0Screen() {
     if (g.confirmados?.length) setConfirmados(new Set(g.confirmados));
     if (g.camposCreados?.length) setCreados(g.camposCreados);
     if (g.camposBorrados?.length) setBorrados(g.camposBorrados);
+    if (g.rectsEditados && Object.keys(g.rectsEditados).length) setRectsEditados(g.rectsEditados);
   }, [ficha, etapa0Guardado]);
 
   // Hidratar ediciones cuando entra el PDF (se re-atan por nombre y por clave
@@ -947,10 +972,12 @@ export default function Etapa0Screen() {
       confirmados: [...confirmados],
       camposCreados: creados,
       camposBorrados: borrados,
+      rectsEditados,
     });
   }, [
     ficha, pdf, fichaFile, pdfFile, hojaInstanciable, hojasBloque, instancias, regiones, ediciones, filasPdf,
-    limitarFuente, tamanoFuente, descargas, detalleAbierto, vistaSimple, confirmados, creados, borrados, setEtapa0,
+    limitarFuente, tamanoFuente, descargas, detalleAbierto, vistaSimple, confirmados, creados, borrados,
+    rectsEditados, setEtapa0,
   ]);
 
   const filasFicha = useMemo(() => {
@@ -1699,6 +1726,7 @@ export default function Etapa0Screen() {
             colisiones={colisionesPdf}
             escalaMinima={modoRevision ? 1.75 : undefined}
             onDibujar={(page, rect) => setDibujo({ page, rect })}
+            onEditarRect={editarRect}
             esCreado={(nombre) => leaves.some((l) => l.name === nombre && l.origen === 'creado')}
           />
         </div>

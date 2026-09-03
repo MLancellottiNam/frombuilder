@@ -305,4 +305,9 @@ export interface Etapa0State {
   camposCreados?: Etapa0CampoCreado[];
   /** nombres ACTUALES de los campos detectados que el usuario borró */
   camposBorrados?: string[];
+  /**
+   * Geometría editada a mano (v2.0.0). Clave: `claveEstable#índiceDeWidget`
+   * sobre la lista ORIGINAL de campos, que no cambia nunca.
+   */
+  rectsEditados?: Record<string, { x: number; y: number; w: number; h: number }>;
 }
