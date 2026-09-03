@@ -299,6 +299,8 @@ export interface Etapa0State {
   detalleAbierto?: boolean;
   /** nombres ACTUALES de los campos que el usuario confirmó a mano en la revisión */
   confirmados?: string[];
+  /** vista simple (default) vs. avanzada, con el diagnóstico del motor (v1.4.5) */
+  vistaSimple?: boolean;
   /** campos dibujados a mano (v1.4.4) */
   camposCreados?: Etapa0CampoCreado[];
   /** nombres ACTUALES de los campos detectados que el usuario borró */

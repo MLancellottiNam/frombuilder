@@ -195,7 +195,7 @@ Cada ítem que falla es **clickeable** y selecciona el campo.
 - **Proyecto** (.json) para guardar/cargar todo el estado, e **Importar JSON** de un
   form-definition existente (preserva `_sourcePdf`, ids y `sourceMeta`).
 
-### 5.8 Etapa 0 — Renombrado asistido (v1.0.0 → v1.5.0, + v1.4.1, v1.4.2 y v1.4.3)
+### 5.8 Etapa 0 — Renombrado asistido (v1.0.0 → v1.5.0, + v1.4.1 … v1.4.5)
 
 La ficha cruda del INS viene con la **col N vacía** y los AcroNames del PDF **mienten**
 (en el CSC `Profesión` es en realidad el Detalle del domicilio extranjero). Etapa 0 toma
@@ -221,15 +221,25 @@ Módulos (`src/lib/etapa0/`):
 | `reporte.ts` | CSV con asignados, huérfanos de los dos lados, colisiones, avisos de col M y la nota de ausencia de `/Sig`. |
 
 UI (`src/components/etapa0/`), reorganizada en **v1.4.2** para mostrar el resultado y no
-el razonamiento del motor:
+el razonamiento del motor, y en **v1.4.5** partida en dos vistas:
 
-- `Etapa0Screen` arranca con un **resumen de tres líneas** (campos resueltos · necesitan
-  revisión · colisiones) más los tres botones de descarga. Nada más. Las colisiones y las
-  regiones sin sembrar suben al resumen como advertencia accionable, porque ahí sí hay que
-  intervenir.
-- **`Ver detalle`** (colapsado, y recuerda su estado en el proyecto) contiene todo el
-  diagnóstico sin perder nada: stats, tabla de la ficha, tabla de los 111 campos con su
-  bulk edit, instancias, regiones y sus avisos, filas sin campo y avisos de col M.
+- **Vista simple (default) vs. avanzada**, recordada en el proyecto. La simple deja
+  adelante solo lo que hay que decidir: los **3 pasos numerados** (archivos · revisión ·
+  descargar), la ficha del campo seleccionado y la tabla de campos con tres columnas
+  (nombre nuevo · estado · de qué fila sale). La avanzada agrega el diagnóstico del motor
+  —stats, instancias, regiones, tabla de la ficha, edición en lote, posiciones, tipo,
+  nombre actual del AcroForm— sin sacar ninguna función: **es lo mismo calculado, distinto
+  cuánto se muestra**. En la simple `media` y `revisar` se dicen igual (**revisar**):
+  la distinción es del motor, no del usuario, y sigue en la avanzada y en el CSV.
+- `PanelCampo` es la respuesta al click: el campo que se toca —en el PDF o en la tabla— se
+  abre con la **etiqueta que el PDF tiene impresa al lado**, el selector de fila **con
+  buscador** como control primario (elegir la fila propone el nombre), el nombre editable y
+  los botones de confirmar / dividir / borrar. Seleccionar además **lleva** hasta el campo:
+  la tabla scrollea su fila y el preview salta a su página y la centra. Antes solo se
+  pintaba, y con 111 filas la seleccionada quedaba fuera de pantalla.
+- **`Ver detalle`** (solo en la vista avanzada, colapsado y recuerda su estado) contiene
+  todo el diagnóstico sin perder nada: stats, tabla de la ficha, tabla de los 111 campos
+  con su bulk edit, instancias, regiones y sus avisos, filas sin campo y avisos de col M.
 - `ModoRevision` recorre de a uno **solo** los campos que necesitan atención
   (media/revisar/sin asignar) con los mismos controles de la tabla, y el preview hace zoom
   para que se lea la etiqueta impresa alrededor del campo. `Confirmar` saca el campo de la
@@ -237,7 +247,14 @@ el razonamiento del motor:
 - El **hand-off** aparece recién al descargar el PDF renombrado, con los pasos que siguen.
 - `TablaCampos` (tabla editable centrada en el campo del PDF, con bulk edit y colisiones en
   rojo) y `PdfPreview` (render con `pdfjs-dist` + overlay clickeable, azul=alta,
-  ámbar=media/revisar, rojo=colisión, gris=sin asignar, bandas de región de fondo).
+  ámbar=media/revisar, rojo=colisión, gris=sin asignar, bandas de región de fondo, con la
+  **leyenda de colores** a la vista desde v1.4.5).
+
+Dos detalles de scroll que costaron una vuelta: el salto a un campo de otra página no puede
+hacerse en el mismo tick que el `setPage` —la caja todavía no existe—, así que va en un
+efecto atado a las cajas ya renderizadas; y traer una fila a la vista con `scrollIntoView`
+arrastra también los contenedores de arriba, así que la tabla mueve **solo** su propia caja
+calculando el delta a mano.
 
 Sobre el conteo de filas sin campo: la alineación corre **solo** sobre las filas
 clasificadas como `pdf`, así que ninguna `solo-json` ni `excluida` entra nunca. De las 71

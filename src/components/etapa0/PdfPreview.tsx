@@ -20,6 +20,16 @@ interface Banda {
   height: number;
 }
 
+/** Cuadradito de color de la leyenda del overlay. */
+function Muestra({ clase, children }: { clase: string; children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className={`inline-block w-3 h-2.5 rounded-sm border ${clase}`} />
+      {children}
+    </span>
+  );
+}
+
 /**
  * Render del PDF a canvas con `pdfjs-dist` (lazy) y overlay de cada widget del
  * AcroForm con su nombre ACTUAL. Sirve para validar la lectura del AcroForm
@@ -200,16 +210,27 @@ export default function PdfPreview({
     return () => window.removeEventListener('keydown', onKey);
   }, [dibujando]);
 
-  // Al seleccionar desde la tabla: saltar a su página y hacer scroll.
+  // Al seleccionar desde la tabla: saltar a su página.
   useEffect(() => {
     if (!selected) return;
     const leaf = leaves.find((l) => l.name === selected);
     if (!leaf) return;
     const target = leaf.widgets[0].page + 1;
     if (target !== page) setPage(target);
-    const el = wrapRef.current?.querySelector<HTMLElement>(`[data-box="${CSS.escape(selected)}"]`);
-    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }, [selected, leaves]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // El scroll va en su propio efecto, atado a `boxes`: cuando el campo está en
+  // otra página, el `setPage` de arriba no alcanza a renderizar la caja en el
+  // mismo tick y el scroll se perdía. Al depender de `boxes` corre recién
+  // cuando la caja existe, así que el salto entre páginas también centra.
+  useEffect(() => {
+    if (!selected) return;
+    const el = wrapRef.current?.querySelector<HTMLElement>(`[data-box="${CSS.escape(selected)}"]`);
+    // Vertical al centro, horizontal lo mínimo: centrar en X corría la página y
+    // dejaba fuera la etiqueta impresa a la izquierda del campo, que es
+    // justamente lo que hay que leer para decidir si el nombre está bien.
+    el?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+  }, [selected, boxes]);
 
   // A.2: si el campo seleccionado tiene widgets en varias páginas, avisarlo.
   // Todos sus widgets se resaltan; los de otra página no se ven en este canvas.
@@ -316,6 +337,20 @@ export default function PdfPreview({
             «{selected}» tiene widgets en las páginas {selMultiPagina.join(', ')}
           </span>
         )}
+      </div>
+
+      {/* Qué significa cada color del overlay. Sin esto hay que adivinarlo. */}
+      <div
+        className="flex flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1 border-b border-slate-100 text-[10px] text-slate-500"
+        data-leyenda
+      >
+        <span className="text-slate-400">Colores:</span>
+        <Muestra clase="border-blue-500/80 bg-blue-500/15">listo</Muestra>
+        <Muestra clase="border-amber-500/80 bg-amber-500/20">revisar</Muestra>
+        <Muestra clase="border-slate-400/70 bg-slate-400/10">sin fila</Muestra>
+        <Muestra clase="border-red-500 bg-red-500/25">nombre repetido</Muestra>
+        <Muestra clase="border-2 border-dashed border-slate-500">creado a mano</Muestra>
+        <span className="text-slate-400">· click en una caja = abre ese campo</span>
       </div>
 
       {error && <p className="text-xs text-red-600 p-3">No se pudo renderizar: {error}</p>}
