@@ -27,6 +27,7 @@
 
 import type { PDFDict as TPDFDict, PDFRef as TPDFRef } from 'pdf-lib';
 import { readPdfFields } from './pdfFields';
+import type { CampoCreado } from './camposManuales';
 
 /** Nombre actual (full name leído) -> nombre final que hay que escribir. */
 export type MapaRenombres = Map<string, string>;
@@ -36,12 +37,20 @@ export interface WritePdfOpts {
   limitarFuente?: boolean;
   /** Tope en puntos (default 10). También reemplaza el auto-size (0 Tf). */
   tamanoFuente?: number;
+  /** Campos dibujados a mano que hay que agregar al PDF (v1.4.4). */
+  creados?: CampoCreado[];
+  /** Nombres ACTUALES de los campos detectados que hay que quitar. */
+  borrados?: string[];
 }
 
 export interface WritePdfResult {
   bytes: Uint8Array;
   /** campos cuyo /T efectivamente cambió */
   renombrados: number;
+  /** campos agregados a mano */
+  creados: number;
+  /** campos detectados que se quitaron */
+  borrados: number;
   /** campos tocados en total (todos se limpian, aunque no cambien de nombre) */
   campos: number;
   /** campos a los que se les borró algún valor (/V o /DV) */
@@ -68,6 +77,8 @@ interface Terminal {
   /** valores heredados de ancestros, ya resueltos */
   heredado: Record<string, unknown>;
   widgets: TPDFDict[];
+  /** refs de los widgets, para poder sacarlos del /Annots al borrar */
+  widgetRefs: TPDFRef[];
 }
 
 export async function escribirPdfRenombrado(
@@ -85,6 +96,7 @@ export async function escribirPdfRenombrado(
     throwOnInvalidObject: false,
   });
   const ctx = doc.context;
+  const pages = doc.getPages();
 
   const decodeText = (v: unknown): string => {
     if (v instanceof PDFString || v instanceof PDFHexString) return v.decodeText();
@@ -143,11 +155,13 @@ export async function escribirPdfRenombrado(
       }
       if (kidsConT === 0) {
         const widgets: TPDFDict[] = [];
+        const widgetRefs: TPDFRef[] = [];
         for (const k of kidEntries) {
           const kd = ctx.lookup(k as never);
           if (kd instanceof PDFDict) widgets.push(kd);
+          if (k instanceof PDFRef) widgetRefs.push(k);
         }
-        terminales.push({ full, dict, ref, heredado: propio, widgets });
+        terminales.push({ full, dict, ref, heredado: propio, widgets, widgetRefs });
         return;
       }
       for (const k of kidEntries) walk(k, full, propio, depth + 1);
@@ -155,7 +169,7 @@ export async function escribirPdfRenombrado(
     }
 
     // terminal merged campo+widget
-    terminales.push({ full, dict, ref, heredado: propio, widgets: [dict] });
+    terminales.push({ full, dict, ref, heredado: propio, widgets: [dict], widgetRefs: ref ? [ref] : [] });
   };
 
   const acro = doc.catalog.lookupMaybe(PDFName.of('AcroForm'), PDFDict);
@@ -178,7 +192,23 @@ export async function escribirPdfRenombrado(
   let limpiados = 0;
   const nuevosRefs: TPDFRef[] = [];
 
+  // --- borrados: fuera de /AcroForm/Fields y del /Annots de su página -------
+  const aBorrar = new Set(opts.borrados ?? []);
+  const refsBorradas = new Set<string>();
+  let borrados = 0;
   for (const t of terminales) {
+    if (!aBorrar.has(t.full)) continue;
+    borrados++;
+    for (const r of t.widgetRefs) refsBorradas.add(r.toString());
+    if (t.ref) refsBorradas.add(t.ref.toString());
+  }
+  const pedidosSinCampo = [...aBorrar].filter((n) => !terminales.some((t) => t.full === n));
+  if (pedidosSinCampo.length > 0) {
+    warnings.push(`Se pidió borrar ${pedidosSinCampo.length} campo(s) que no están en el PDF: ${pedidosSinCampo.join(', ')}.`);
+  }
+
+  for (const t of terminales) {
+    if (aBorrar.has(t.full)) continue; // borrado: no entra a /Fields
     // 1) bajar heredables que el terminal no declara (al aplanar pierde al padre)
     for (const k of HEREDABLES) {
       if (t.dict.get(PDFName.of(k)) === undefined && t.heredado[k] !== undefined) {
@@ -224,6 +254,68 @@ export async function escribirPdfRenombrado(
     if (daDoc) acro.set(PDFName.of('DA'), textoPdf(capDA(daDoc, tope)));
   }
 
+  // --- creados: un widget nuevo por campo dibujado a mano -------------------
+  const creados = opts.creados ?? [];
+  const nuevosPorPagina = new Map<number, TPDFRef[]>();
+  let conFirma = false;
+  for (const c of creados) {
+    const pagina = pages[c.page];
+    if (!pagina) {
+      warnings.push(`El campo creado «${c.nombre}» apunta a la página ${c.page + 1}, que no existe: se omite.`);
+      continue;
+    }
+    const dict: Record<string, unknown> = {
+      Type: PDFName.of('Annot'),
+      Subtype: PDFName.of('Widget'),
+      FT: PDFName.of(c.tipo.replace(/^\//, '')),
+      T: textoPdf(c.nombre),
+      Rect: ctx.obj([c.rect.x, c.rect.y, c.rect.x + c.rect.w, c.rect.y + c.rect.h]),
+      // /F 4 = Print: sin esto el campo existe pero no se imprime ni exporta.
+      F: ctx.obj(4),
+      P: pagina.ref,
+      DA: textoPdf(`/Helv ${opts.limitarFuente ? tope : 10} Tf 0 g`),
+    };
+    if (c.tipo === '/Btn') {
+      // Una casilla necesita estado y apariencias on/off para ser válida. El
+      // contenido lo regenera el visor por /NeedAppearances; lo que importa es
+      // que la estructura esté completa.
+      dict.AS = PDFName.of('Off');
+      dict.MK = ctx.obj({ BC: ctx.obj([0, 0, 0]), BG: ctx.obj([1, 1, 1]) });
+      const vacio = () =>
+        ctx.register(
+          ctx.stream('', {
+            Type: PDFName.of('XObject'),
+            Subtype: PDFName.of('Form'),
+            BBox: ctx.obj([0, 0, c.rect.w, c.rect.h]),
+          }),
+        );
+      dict.AP = ctx.obj({ N: ctx.obj({ Off: vacio(), On: vacio() }) });
+    }
+    if (c.tipo === '/Sig') conFirma = true;
+    const ref = ctx.register(ctx.obj(dict as never));
+    nuevosRefs.push(ref);
+    if (!nuevosPorPagina.has(c.page)) nuevosPorPagina.set(c.page, []);
+    nuevosPorPagina.get(c.page)!.push(ref);
+  }
+  // Un AcroForm con campos de firma tiene que declararlo.
+  if (conFirma) acro.set(PDFName.of('SigFlags'), ctx.obj(3));
+
+  // --- /Annots de cada página: sacar los borrados, sumar los creados --------
+  pages.forEach((pagina, i) => {
+    const annots = pagina.node.lookupMaybe(PDFName.of('Annots'), PDFArray);
+    const quedan: unknown[] = [];
+    if (annots) {
+      for (let k = 0; k < annots.size(); k++) {
+        const entry = annots.get(k);
+        if (entry instanceof PDFRef && refsBorradas.has(entry.toString())) continue;
+        quedan.push(entry);
+      }
+    }
+    const sumar = nuevosPorPagina.get(i) ?? [];
+    if (!annots && sumar.length === 0) return;
+    pagina.node.set(PDFName.of('Annots'), ctx.obj([...quedan, ...sumar] as never));
+  });
+
   // /AcroForm/Fields plano + regenerar apariencias al abrir.
   acro.set(PDFName.of('Fields'), ctx.obj(nuevosRefs));
   acro.set(PDFName.of('NeedAppearances'), ctx.obj(true));
@@ -252,11 +344,21 @@ export async function escribirPdfRenombrado(
         (dup.length > 10 ? ' …' : ''),
     );
   }
-  if (releido.leaves.length !== terminales.length) {
+  const esperados = terminales.length - borrados + creados.length;
+  if (releido.leaves.length !== esperados) {
     throw new Error(
-      `El PDF renombrado perdió campos al escribirse: entraron ${terminales.length} y salieron ${releido.leaves.length}.`,
+      `El PDF renombrado no tiene la cantidad de campos esperada: ${terminales.length} detectados ` +
+        `- ${borrados} borrados + ${creados.length} creados = ${esperados}, y salieron ${releido.leaves.length}.`,
     );
   }
 
-  return { bytes, renombrados, campos: terminales.length, limpiados, warnings };
+  return {
+    bytes,
+    renombrados,
+    creados: creados.length,
+    borrados,
+    campos: esperados,
+    limpiados,
+    warnings,
+  };
 }

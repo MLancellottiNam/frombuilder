@@ -51,6 +51,16 @@ export interface PdfLeaf {
   multiWidgetSospechoso: boolean;
   /** páginas donde aparece (útil cuando el campo cruza páginas) */
   paginas: number[];
+  /**
+   * De dónde salió el campo. Los detectados vienen del AcroForm; los creados los
+   * dibujó el usuario (v1.4.4).
+   */
+  origen?: 'detectado' | 'creado';
+  /**
+   * Identidad estable de un campo CREADO, independiente de su nombre. Los
+   * detectados no la llevan: su identidad es el AcroName original, que no cambia.
+   */
+  uid?: string;
 }
 
 export interface PdfFieldsResult {
@@ -216,6 +226,7 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
       readingIndex: i + 1,
       paginas,
       multiWidgetSospechoso: l.ft === '/Tx' && l.widgets.length > 1,
+      origen: 'detectado' as const,
     };
   });
 
