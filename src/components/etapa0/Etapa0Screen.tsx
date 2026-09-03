@@ -33,6 +33,7 @@ import {
   colorRegion,
   construirSegmentos,
   elegibilidadPorRegion,
+  etiquetasDeLeaf,
   evidenciaEnContra,
   evidenciaFuerte,
   extraerTextoPdf,
@@ -58,6 +59,7 @@ import {
 import { sufijosDeFormato } from '../../lib/etapa0/regiones';
 import TablaCampos, { nombreEfectivo, type Ediciones } from './TablaCampos';
 import ModoRevision from './ModoRevision';
+import PanelCampo from './PanelCampo';
 import PanelCrearCampo, { type DatosCampoNuevo } from './PanelCrearCampo';
 import PdfPreview from './PdfPreview';
 
@@ -91,6 +93,35 @@ function Paso({ ok, n, children }: { ok: boolean; n: number; children: React.Rea
         {children}
       </span>
     </li>
+  );
+}
+
+/** Un paso del resumen: número, título y el contenido accionable. */
+function Bloque({
+  n,
+  titulo,
+  ok,
+  children,
+}: {
+  n: number;
+  titulo: string;
+  ok: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-2 py-1.5 border-b border-slate-100 last:border-0" data-bloque={n}>
+      <span
+        className={`flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-semibold shrink-0 ${
+          ok ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'
+        }`}
+      >
+        {ok ? '✓' : n}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{titulo}</div>
+        <div className="text-xs mt-0.5">{children}</div>
+      </div>
+    </div>
   );
 }
 
@@ -142,6 +173,13 @@ export default function Etapa0Screen() {
   const [trabajando, setTrabajando] = useState<string | null>(null);
   const [avisoEscritura, setAvisoEscritura] = useState<string | null>(null);
   const [detalleAbierto, setDetalleAbierto] = useState(false);
+  /**
+   * v1.4.5: la vista simple es el default. Deja adelante lo que hay que decidir
+   * y guarda el diagnóstico del motor —stats, instancias, regiones, tabla de
+   * ficha, edición en lote— en la avanzada. No cambia ningún cálculo: los
+   * mismos números se siguen calculando, solo no se muestran todos a la vez.
+   */
+  const [vistaSimple, setVistaSimple] = useState(true);
   const [modoRevision, setModoRevision] = useState(false);
   const [revIdx, setRevIdx] = useState(0);
   /** nombres ACTUALES de campos que el usuario confirmó a mano en la revisión */
@@ -589,6 +627,39 @@ export default function Etapa0Screen() {
 
   const resueltos = (pdf?.leaves.length ?? 0) - pendientes.length;
 
+  /**
+   * Seleccionar un campo —haciendo click en el PDF o en la tabla— tiene que
+   * LLEVAR hasta él. Antes solo se pintaba: con 111 filas, la seleccionada
+   * quedaba fuera de la pantalla y el click parecía no hacer nada. Acá se
+   * asegura que la fila esté visible; el scroll lo hacen la tabla y el preview.
+   */
+  const seleccionar = (name: string) => {
+    setSelected(name);
+    setTab('pdf');
+    if (!vistaSimple) setDetalleAbierto(true);
+    // Un buscador con texto puede tener la fila filtrada afuera.
+    if (q && !name.toLowerCase().includes(q.toLowerCase())) {
+      const ed = ediciones[leaves.findIndex((l) => l.name === name)];
+      if (!(ed?.nombreNuevo ?? '').toLowerCase().includes(q.toLowerCase())) setQ('');
+    }
+  };
+
+  /** Índice del campo seleccionado en la lista efectiva. */
+  const idxSeleccionado = useMemo(
+    () => (selected ? leaves.findIndex((l) => l.name === selected) : -1),
+    [selected, leaves],
+  );
+
+  /**
+   * Lo que el PDF tiene IMPRESO al lado del campo seleccionado. Es el dato con
+   * el que el usuario decide si el nombre está bien, y hasta ahora había que
+   * buscarlo a ojo en el preview.
+   */
+  const etiquetaImpresa = useMemo(() => {
+    if (idxSeleccionado < 0 || textoPdf.length === 0) return undefined;
+    return etiquetasDeLeaf(leaves[idxSeleccionado], textoPdf);
+  }, [idxSeleccionado, leaves, textoPdf]);
+
   /** Regiones que quedaron sin sembrar o vacías: eso sí exige intervenir. */
   const regionesProblema = useMemo(() => {
     if (!pdf || activas.length === 0) return [] as string[];
@@ -773,6 +844,13 @@ export default function Etapa0Screen() {
   const setEtapa0 = useStore((s) => s.setEtapa0);
   const hidratado = useRef({ ficha: false, pdf: false });
 
+  // La vista elegida es una preferencia de UI y no depende de los archivos: se
+  // restaura al entrar a la pantalla, no al re-adjuntar la ficha.
+  useEffect(() => {
+    const v = useStore.getState().project.etapa0?.vistaSimple;
+    if (v != null) setVistaSimple(v);
+  }, []);
+
   // Hidratar instancias cuando entra la ficha.
   useEffect(() => {
     if (!ficha || hidratado.current.ficha) return;
@@ -865,13 +943,14 @@ export default function Etapa0Screen() {
       fichaDescargada: descargas.ficha,
       reporteDescargado: descargas.reporte,
       detalleAbierto,
+      vistaSimple,
       confirmados: [...confirmados],
       camposCreados: creados,
       camposBorrados: borrados,
     });
   }, [
     ficha, pdf, fichaFile, pdfFile, hojaInstanciable, hojasBloque, instancias, regiones, ediciones, filasPdf,
-    limitarFuente, tamanoFuente, descargas, detalleAbierto, confirmados, creados, borrados, setEtapa0,
+    limitarFuente, tamanoFuente, descargas, detalleAbierto, vistaSimple, confirmados, creados, borrados, setEtapa0,
   ]);
 
   const filasFicha = useMemo(() => {
@@ -928,6 +1007,26 @@ export default function Etapa0Screen() {
         </span>
         <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">{BADGE}</span>
         <div className="flex-1" />
+        {/* Vista simple vs. avanzada: lo mismo calculado, distinto cuánto se muestra. */}
+        <div className="flex rounded-md border border-slate-300 overflow-hidden text-[11px]" data-vista={vistaSimple ? 'simple' : 'avanzada'}>
+          {([true, false] as const).map((v) => (
+            <button
+              key={String(v)}
+              onClick={() => setVistaSimple(v)}
+              data-vista-btn={v ? 'simple' : 'avanzada'}
+              className={`px-2 py-1 ${
+                vistaSimple === v ? 'bg-slate-700 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'
+              }`}
+              title={
+                v
+                  ? 'Solo lo que hay que decidir'
+                  : 'Agrega el diagnóstico del motor: stats, instancias, regiones, tabla de ficha y edición en lote'
+              }
+            >
+              {v ? 'Simple' : 'Avanzada'}
+            </button>
+          ))}
+        </div>
         <input ref={fichaInput} type="file" accept=".xlsx,.xls" hidden onChange={onFicha} />
         <input ref={pdfInput} type="file" accept="application/pdf,.pdf" hidden onChange={onPdf} />
         <Button onClick={() => fichaInput.current?.click()}>
@@ -955,6 +1054,26 @@ export default function Etapa0Screen() {
                 Cargá la <b>ficha cruda (.xlsx)</b> y el <b>PDF crudo</b> con los botones de arriba.
               </div>
             </div>
+          )}
+
+          {/* El campo en el que se hizo click, sea en el PDF o en la tabla. */}
+          {ficha && pdf && !modoRevision && idxSeleccionado >= 0 && (
+            <PanelCampo
+              leaf={leaves[idxSeleccionado]}
+              idx={idxSeleccionado}
+              filasPdf={filasPdf}
+              ediciones={ediciones}
+              setEdiciones={setEdiciones}
+              confianza={confianzaPorLeaf.get(leaves[idxSeleccionado].name)}
+              motivos={motivosPorLeaf.get(idxSeleccionado) ?? []}
+              colisiones={colisionesPdf}
+              confirmado={confirmados.has(leaves[idxSeleccionado].name)}
+              etiquetaImpresa={etiquetaImpresa}
+              onConfirmar={confirmar}
+              onBorrar={borrarCampo}
+              onReemplazarPorN={reemplazarPorN}
+              onCerrar={() => setSelected(null)}
+            />
           )}
 
           {ficha && pdf && modoRevision && (
@@ -1025,26 +1144,36 @@ export default function Etapa0Screen() {
                 <div className="mb-2 flex items-start gap-2 rounded-md border border-amber-400 bg-amber-50 px-2 py-1.5 text-xs text-amber-800">
                   <AlertTriangle size={15} className="mt-[1px] shrink-0" />
                   <span data-linea-regiones>
-                    <b>Hay regiones sin resolver</b> ({regionesProblema.join(' · ')}). Abrí <b>Ver detalle</b> y elegí
-                    el primer y último campo de cada instancia.
+                    <b>Hay regiones sin resolver</b> ({regionesProblema.join(' · ')}). Pasá a la vista{' '}
+                    <b>Avanzada</b> y elegí el primer y último campo de cada instancia.
                   </span>
                 </div>
               )}
 
-              <ul className="space-y-1.5 text-sm">
-                <li className="flex items-center gap-2" data-linea-resueltos>
-                  <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
-                  <b className="text-slate-800">{resueltos}</b>
-                  <span className="text-slate-600">campos resueltos</span>
-                </li>
-                <li className="flex items-center gap-2" data-linea-pendientes>
-                  {pendientes.length > 0 ? (
-                    <AlertTriangle size={16} className="text-amber-500 shrink-0" />
-                  ) : (
-                    <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+              {/* Los tres pasos, en orden, con el número adelante. */}
+              <Bloque n={1} titulo="Archivos" ok>
+                <span className="text-slate-600">
+                  ficha <b className="text-emerald-700">✓</b> · PDF <b className="text-emerald-700">✓</b> ·{' '}
+                  <span data-linea-resueltos>
+                    <b className="text-slate-800">{resueltos}</b> de {leaves.length} campos listos
+                  </span>
+                </span>
+              </Bloque>
+
+              <Bloque
+                n={2}
+                titulo="Revisión"
+                ok={pendientes.length === 0 && colisionesPdf.size === 0}
+              >
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-slate-600" data-linea-pendientes>
+                    <b className="text-slate-800">{pendientes.length}</b> necesitan tu revisión
+                  </span>
+                  {colisionesPdf.size > 0 && (
+                    <span className="text-red-600">
+                      · <b>{colisionesPdf.size}</b> con el nombre repetido
+                    </span>
                   )}
-                  <b className="text-slate-800">{pendientes.length}</b>
-                  <span className="text-slate-600">necesitan tu revisión</span>
                   {pendientes.length > 0 && (
                     <button
                       onClick={() => {
@@ -1052,38 +1181,34 @@ export default function Etapa0Screen() {
                         setModoRevision(true);
                       }}
                       data-revisar
-                      className="ml-auto inline-flex items-center gap-1 rounded-md bg-brand-600 px-3 py-1 text-xs text-white hover:bg-brand-700"
+                      className="ml-auto inline-flex items-center gap-1 rounded-md bg-brand-600 px-3 py-1.5 text-xs text-white hover:bg-brand-700"
                     >
-                      Revisar <ArrowRight size={13} />
+                      Revisar los {pendientes.length} de a uno <ArrowRight size={13} />
                     </button>
                   )}
-                </li>
-                <li className="flex items-center gap-2">
-                  {colisionesPdf.size === 0 ? (
-                    <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
-                  ) : (
-                    <AlertTriangle size={16} className="text-red-500 shrink-0" />
-                  )}
-                  <b className="text-slate-800">{colisionesPdf.size}</b>
-                  <span className="text-slate-600">colisiones</span>
-                </li>
-              </ul>
+                </div>
+              </Bloque>
 
-              <div className="mt-3 pt-2 border-t border-slate-100">{botonesDescarga}</div>
-              <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-500">
-                <input type="checkbox" checked={limitarFuente} onChange={(e) => setLimitarFuente(e.target.checked)} />
-                Topear el tamaño de fuente en
-                <input
-                  type="number"
-                  min={4}
-                  max={24}
-                  value={tamanoFuente}
-                  onChange={(e) => setTamanoFuente(Number(e.target.value) || 10)}
-                  disabled={!limitarFuente}
-                  className="w-12 rounded border border-slate-300 px-1 py-0.5 disabled:opacity-40"
-                />
-                pt
-              </label>
+              <Bloque n={3} titulo="Descargar" ok={nDescargas === 3}>
+                {botonesDescarga}
+              </Bloque>
+
+              {!vistaSimple && (
+                <label className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500">
+                  <input type="checkbox" checked={limitarFuente} onChange={(e) => setLimitarFuente(e.target.checked)} />
+                  Topear el tamaño de fuente en
+                  <input
+                    type="number"
+                    min={4}
+                    max={24}
+                    value={tamanoFuente}
+                    onChange={(e) => setTamanoFuente(Number(e.target.value) || 10)}
+                    disabled={!limitarFuente}
+                    className="w-12 rounded border border-slate-300 px-1 py-0.5 disabled:opacity-40"
+                  />
+                  pt
+                </label>
+              )}
               {avisoEscritura && <p className="mt-1.5 text-[11px] text-emerald-700">{avisoEscritura}</p>}
             </div>
           )}
@@ -1119,8 +1244,40 @@ export default function Etapa0Screen() {
             </div>
           )}
 
+          {/* --- VISTA SIMPLE: la tabla de campos y nada más --- */}
+          {pdf && !modoRevision && vistaSimple && (
+            <div className="flex flex-col rounded-md border border-slate-200 bg-white h-[440px]" data-tabla-simple>
+              <div className="flex items-center gap-2 px-2 py-1.5 border-b border-slate-200">
+                <span className="text-xs font-medium text-slate-700 shrink-0">Campos del PDF</span>
+                <div className="relative flex-1">
+                  <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    placeholder="Buscar un campo…"
+                    className="w-full rounded-md border border-slate-300 pl-7 pr-2 py-1 text-xs outline-none focus:border-brand-500"
+                  />
+                </div>
+              </div>
+              <TablaCampos
+                leaves={leaves}
+                filasPdf={filasPdf}
+                ediciones={ediciones}
+                setEdiciones={setEdiciones}
+                confianzaPorLeaf={confianzaPorLeaf}
+                colisiones={colisionesPdf}
+                selected={selected}
+                onSelect={seleccionar}
+                query={q}
+                onBorrar={borrarCampo}
+                onReemplazarPorN={reemplazarPorN}
+                simple
+              />
+            </div>
+          )}
+
           {/* --- VER DETALLE: todo el diagnóstico, colapsado --- */}
-          {(ficha || pdf) && !modoRevision && (
+          {(ficha || pdf) && !modoRevision && !vistaSimple && (
             <details
               open={detalleAbierto}
               onToggle={(e) => setDetalleAbierto((e.currentTarget as HTMLDetailsElement).open)}
@@ -1508,7 +1665,7 @@ export default function Etapa0Screen() {
                         confianzaPorLeaf={confianzaPorLeaf}
                         colisiones={colisionesPdf}
                         selected={selected}
-                        onSelect={setSelected}
+                        onSelect={seleccionar}
                         query={q}
                         onBorrar={borrarCampo}
                         onReemplazarPorN={reemplazarPorN}
@@ -1536,7 +1693,7 @@ export default function Etapa0Screen() {
             regiones={regiones}
             regionPorLeaf={regionPorLeaf}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={seleccionar}
             confianza={confianzaPorLeaf}
             nombreFinal={nombreFinalPorLeaf}
             colisiones={colisionesPdf}

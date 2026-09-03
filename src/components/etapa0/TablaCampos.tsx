@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, Wand2, MapPin, Trash2, Split } from 'lucide-react';
 import type { PdfLeaf } from '../../lib/etapa0/pdfFields';
 import type { Confianza } from '../../lib/etapa0/align';
@@ -24,6 +24,17 @@ const CONF_STYLE: Record<Confianza, string> = {
   revisar: 'bg-red-50 text-red-600',
 };
 
+/**
+ * En la vista simple la confianza se dice en dos palabras. «media» y «revisar»
+ * piden lo mismo del usuario —mirarlo— así que la distinción es del motor, no
+ * suya; queda visible en la vista avanzada y en el reporte CSV.
+ */
+const CONF_SIMPLE: Record<Confianza, string> = {
+  alta: 'listo',
+  media: 'revisar',
+  revisar: 'revisar',
+};
+
 export function nombreEfectivo(leaf: PdfLeaf, ed?: EdicionCampo): string {
   const n = ed?.nombreNuevo?.trim();
   return n ? n : leaf.name;
@@ -41,6 +52,7 @@ export default function TablaCampos({
   query,
   onBorrar,
   onReemplazarPorN,
+  simple = false,
 }: {
   leaves: PdfLeaf[];
   filasPdf: NombrePropuesto[];
@@ -55,6 +67,12 @@ export default function TablaCampos({
   onBorrar?: (i: number) => void;
   /** v1.4.4: reemplazar el campo por N cajas dentro de su mismo rect */
   onReemplazarPorN?: (i: number, n: number) => void;
+  /**
+   * v1.4.5: vista simple. Deja solo lo que hay que decidir (nombre nuevo, de qué
+   * fila sale y si está listo) y esconde lo del motor: nombre actual del
+   * AcroForm, tipo, posiciones y la edición en lote.
+   */
+  simple?: boolean;
 }) {
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [verPosiciones, setVerPosiciones] = useState(false);
@@ -69,6 +87,26 @@ export default function TablaCampos({
       const ed = ediciones[i];
       return (leaf.name + ' ' + (ed?.nombreNuevo ?? '')).toLowerCase().includes(q);
     });
+
+  /**
+   * Al seleccionar un campo desde el PDF, la fila se pintaba pero nunca se
+   * scrolleaba: con 111 filas quedaba fuera de la pantalla y parecía que el
+   * click no había hecho nada.
+   */
+  const filas = useRef(new Map<string, HTMLTableRowElement>());
+  useEffect(() => {
+    if (!selected) return;
+    const fila = filas.current.get(selected);
+    const cont = fila?.closest<HTMLElement>('.overflow-auto');
+    if (!fila || !cont) return;
+    // A mano en vez de `scrollIntoView`: ese scrollea también los contenedores
+    // de arriba, y movía la columna entera dejando media pantalla fuera de
+    // vista. Acá se mueve SOLO la caja de la tabla.
+    const f = fila.getBoundingClientRect();
+    const c = cont.getBoundingClientRect();
+    if (f.top < c.top) cont.scrollTop -= c.top - f.top + 8;
+    else if (f.bottom > c.bottom) cont.scrollTop += f.bottom - c.bottom + 8;
+  }, [selected, visibles.length]);
 
   const patch = (i: number, p: Partial<EdicionCampo>) =>
     setEdiciones((prev) => {
@@ -114,9 +152,18 @@ export default function TablaCampos({
       {/* Contador + acciones */}
       <div className="flex flex-wrap items-center gap-2 px-2 py-1.5 border-b border-slate-100 text-[11px]">
         <span className="text-slate-600">
-          <b>{leaves.length}</b> campos ({totalWidgets} widgets) · <b className="text-emerald-700">{renombrados}</b>{' '}
-          renombrados · <b className="text-amber-600">{enRevisar}</b> en revisar ·{' '}
-          <b className={colisiones.size ? 'text-red-600' : 'text-slate-500'}>{colisiones.size}</b> colisiones
+          {simple ? (
+            <>
+              <b>{leaves.length}</b> campos · <b className="text-emerald-700">{renombrados}</b> con nombre nuevo ·{' '}
+              <b className="text-amber-600">{enRevisar}</b> para revisar
+            </>
+          ) : (
+            <>
+              <b>{leaves.length}</b> campos ({totalWidgets} widgets) · <b className="text-emerald-700">{renombrados}</b>{' '}
+              renombrados · <b className="text-amber-600">{enRevisar}</b> en revisar ·{' '}
+              <b className={colisiones.size ? 'text-red-600' : 'text-slate-500'}>{colisiones.size}</b> colisiones
+            </>
+          )}
           {nCreados > 0 && (
             <>
               {' '}
@@ -124,17 +171,20 @@ export default function TablaCampos({
             </>
           )}
         </span>
-        <button
-          onClick={() => setVerPosiciones((v) => !v)}
-          className={`ml-auto inline-flex items-center gap-1 rounded px-2 py-0.5 border ${
-            verPosiciones ? 'bg-slate-700 text-white border-slate-700' : 'bg-white border-slate-300 text-slate-600'
-          }`}
-        >
-          <MapPin size={12} /> Posiciones
-        </button>
+        {!simple && (
+          <button
+            onClick={() => setVerPosiciones((v) => !v)}
+            className={`ml-auto inline-flex items-center gap-1 rounded px-2 py-0.5 border ${
+              verPosiciones ? 'bg-slate-700 text-white border-slate-700' : 'bg-white border-slate-300 text-slate-600'
+            }`}
+          >
+            <MapPin size={12} /> Posiciones
+          </button>
+        )}
       </div>
 
       {/* Bulk edit */}
+      {!simple && (
       <div className="flex flex-wrap items-center gap-1 px-2 py-1.5 border-b border-slate-100 text-[11px] bg-slate-50">
         <Wand2 size={12} className="text-slate-400" />
         <span className="text-slate-500">{sel.size} sel.</span>
@@ -166,19 +216,24 @@ export default function TablaCampos({
           ninguno
         </button>
       </div>
+      )}
 
       <div className="flex-1 overflow-auto scroll-thin">
         <table className="w-full text-[11px]">
           <thead className="sticky top-0 bg-slate-50 text-slate-500 z-10">
             <tr>
-              <th className="w-6" />
+              {!simple && <th className="w-6" />}
               <th className="text-right px-1 py-1 font-medium w-8">#</th>
-              <th className="text-left px-1 py-1 font-medium">Nombre actual (PDF)</th>
-              <th className="w-3" />
+              {!simple && (
+                <>
+                  <th className="text-left px-1 py-1 font-medium">Nombre actual (PDF)</th>
+                  <th className="w-3" />
+                </>
+              )}
               <th className="text-left px-1 py-1 font-medium">Nombre nuevo</th>
-              <th className="text-left px-1 py-1 font-medium w-14">Tipo</th>
-              <th className="text-left px-1 py-1 font-medium w-16">Confianza</th>
-              <th className="text-left px-1 py-1 font-medium">Fila ficha</th>
+              {!simple && <th className="text-left px-1 py-1 font-medium w-14">Tipo</th>}
+              <th className="text-left px-1 py-1 font-medium w-16">{simple ? 'Estado' : 'Confianza'}</th>
+              <th className="text-left px-1 py-1 font-medium">{simple ? 'De qué fila sale' : 'Fila ficha'}</th>
               {verPosiciones && <th className="text-left px-1 py-1 font-medium">Posición</th>}
               <th className="w-14" />
             </tr>
@@ -193,60 +248,93 @@ export default function TablaCampos({
               return (
                 <tr
                   key={i}
+                  ref={(el) => {
+                    if (el) filas.current.set(leaf.name, el);
+                    else filas.current.delete(leaf.name);
+                  }}
+                  data-fila={leaf.name}
                   onClick={() => onSelect(leaf.name)}
-                  className={`border-b border-slate-50 cursor-pointer ${isSel ? 'bg-brand-50' : 'hover:bg-slate-50'}`}
+                  className={`border-b border-slate-50 cursor-pointer ${
+                    isSel ? 'bg-brand-50 ring-1 ring-inset ring-brand-300' : 'hover:bg-slate-50'
+                  }`}
                 >
-                  <td className="px-1">
-                    <input type="checkbox" checked={sel.has(i)} onChange={() => toggleSel(i)} onClick={(e) => e.stopPropagation()} />
-                  </td>
+                  {!simple && (
+                    <td className="px-1">
+                      <input type="checkbox" checked={sel.has(i)} onChange={() => toggleSel(i)} onClick={(e) => e.stopPropagation()} />
+                    </td>
+                  )}
                   <td className="px-1 py-1 text-right text-slate-400">{leaf.readingIndex}</td>
-                  <td className="px-1 py-1 font-mono text-slate-500 truncate max-w-[140px]" title={leaf.name}>
-                    {leaf.origen === 'creado' && (
-                      <span className="mr-1 rounded bg-brand-100 text-brand-700 px-1" title="Campo creado a mano">
-                        nuevo
+                  {!simple && (
+                    <>
+                      <td className="px-1 py-1 font-mono text-slate-500 truncate max-w-[140px]" title={leaf.name}>
+                        {leaf.origen === 'creado' && (
+                          <span className="mr-1 rounded bg-brand-100 text-brand-700 px-1" title="Campo creado a mano">
+                            nuevo
+                          </span>
+                        )}
+                        {leaf.name}
+                        {leaf.multiWidgetSospechoso && (
+                          <span className="ml-1 rounded bg-amber-100 text-amber-700 px-1" title={`${leaf.widgets.length} widgets en páginas ${leaf.paginas.map((p) => p + 1).join(', ')}`}>
+                            ×{leaf.widgets.length}
+                          </span>
+                        )}
+                      </td>
+                      <td className="text-slate-300">→</td>
+                    </>
+                  )}
+                  <td className="px-1 py-1">
+                    <div className="flex items-center gap-1">
+                      {simple && leaf.origen === 'creado' && (
+                        <span
+                          className="rounded bg-brand-100 text-brand-700 px-1 shrink-0"
+                          title="Campo creado a mano"
+                        >
+                          nuevo
+                        </span>
+                      )}
+                      <input
+                        value={ed?.nombreNuevo ?? ''}
+                        placeholder={leaf.name}
+                        data-nombre={leaf.name}
+                        data-efectivo={efectivo}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => patch(i, { nombreNuevo: e.target.value })}
+                        className={`w-full rounded border px-1 py-0.5 font-mono ${
+                          choca ? 'border-red-400 bg-red-50 text-red-700' : 'border-slate-300'
+                        }`}
+                        title={choca ? `COLISIÓN: ya hay otro campo llamado "${efectivo}"` : efectivo}
+                      />
+                    </div>
+                  </td>
+                  {!simple && (
+                    <td className="px-1 py-1">
+                      <select
+                        value={ed?.tipo ?? leaf.ft}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => patch(i, { tipo: e.target.value })}
+                        className="w-full rounded border border-slate-300 px-0.5 py-0.5"
+                      >
+                        {['/Tx', '/Btn', '/Ch', '/Sig'].map((t) => (
+                          <option key={t} value={t}>
+                            {t.replace('/', '')}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                  )}
+                  <td className="px-1 py-1">
+                    {choca ? (
+                      <span className="rounded px-1 bg-red-50 text-red-600" title={`Ya hay otro campo llamado «${efectivo}»`}>
+                        {simple ? 'repetido' : 'colisión'}
                       </span>
-                    )}
-                    {leaf.name}
-                    {leaf.multiWidgetSospechoso && (
-                      <span className="ml-1 rounded bg-amber-100 text-amber-700 px-1" title={`${leaf.widgets.length} widgets en páginas ${leaf.paginas.map((p) => p + 1).join(', ')}`}>
-                        ×{leaf.widgets.length}
+                    ) : conf ? (
+                      <span className={`rounded px-1 ${CONF_STYLE[conf]}`} title={conf}>
+                        {simple ? CONF_SIMPLE[conf] : conf}
                       </span>
-                    )}
-                  </td>
-                  <td className="text-slate-300">→</td>
-                  <td className="px-1 py-1">
-                    <input
-                      value={ed?.nombreNuevo ?? ''}
-                      placeholder={leaf.name}
-                      data-nombre={leaf.name}
-                      data-efectivo={efectivo}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => patch(i, { nombreNuevo: e.target.value })}
-                      className={`w-full rounded border px-1 py-0.5 font-mono ${
-                        choca ? 'border-red-400 bg-red-50 text-red-700' : 'border-slate-300'
-                      }`}
-                      title={choca ? `COLISIÓN: ya hay otro campo llamado "${efectivo}"` : efectivo}
-                    />
-                  </td>
-                  <td className="px-1 py-1">
-                    <select
-                      value={ed?.tipo ?? leaf.ft}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => patch(i, { tipo: e.target.value })}
-                      className="w-full rounded border border-slate-300 px-0.5 py-0.5"
-                    >
-                      {['/Tx', '/Btn', '/Ch', '/Sig'].map((t) => (
-                        <option key={t} value={t}>
-                          {t.replace('/', '')}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="px-1 py-1">
-                    {conf ? (
-                      <span className={`rounded px-1 ${CONF_STYLE[conf]}`}>{conf}</span>
                     ) : (
-                      <span className="rounded px-1 bg-slate-100 text-slate-500">sin asignar</span>
+                      <span className="rounded px-1 bg-slate-100 text-slate-500">
+                        {simple ? 'sin fila' : 'sin asignar'}
+                      </span>
                     )}
                   </td>
                   <td className="px-1 py-1">
@@ -289,7 +377,7 @@ export default function TablaCampos({
                     >
                       <X size={12} />
                     </button>
-                    {onReemplazarPorN && (
+                    {onReemplazarPorN && !simple && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
