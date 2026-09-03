@@ -1,18 +1,27 @@
-import { FileSignature, Table2, Link2, Download, ArrowRight, CheckCircle2, Circle } from 'lucide-react';
+import { FileSignature, Table2, Link2, Download, ArrowRight, Check, AlertTriangle } from 'lucide-react';
 import { useStore } from '../store/store';
 import { flattenFields } from '../lib/matching';
+import { VERSION, BADGE } from '../version';
 
-/** Chip de estado del proyecto (qué hay cargado hoy). */
-function Estado({ hecho, children }: { hecho: boolean; children: React.ReactNode }) {
+/** Celda de estado del proyecto (qué hay cargado hoy). */
+function Estado({ label, valor, hecho }: { label: string; valor: string; hecho: boolean }) {
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${
-        hecho ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+    <div
+      className={`rounded-md border px-2.5 py-1.5 ${
+        hecho ? 'border-emerald-200 bg-emerald-50/60' : 'border-slate-200 bg-white'
       }`}
     >
-      {hecho ? <CheckCircle2 size={13} /> : <Circle size={13} />}
-      {children}
-    </span>
+      <div className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-slate-400">
+        {hecho && <Check size={11} className="text-emerald-600" />}
+        {label}
+      </div>
+      <div
+        className={`text-xs mt-0.5 truncate ${hecho ? 'text-emerald-800 font-medium' : 'text-slate-400'}`}
+        title={valor}
+      >
+        {valor}
+      </div>
+    </div>
   );
 }
 
@@ -26,18 +35,43 @@ interface EtapaCardProps {
   comoSeUsa: string;
   onClick: () => void;
   cta: string;
+  /** la tarjeta se muestra como el paso recomendado para arrancar */
+  destacada?: boolean;
 }
 
-function EtapaCard({ n, titulo, icon, badge, necesita, produce, comoSeUsa, onClick, cta }: EtapaCardProps) {
+function EtapaCard({
+  n,
+  titulo,
+  icon,
+  badge,
+  necesita,
+  produce,
+  comoSeUsa,
+  onClick,
+  cta,
+  destacada,
+}: EtapaCardProps) {
   return (
     <button
       onClick={onClick}
-      className="group text-left rounded-lg border border-slate-200 bg-white p-4 hover:border-brand-400 hover:shadow-sm transition-all flex flex-col"
+      className={`group w-full text-left rounded-lg border bg-white p-4 hover:shadow-sm transition-all flex flex-col ${
+        destacada
+          ? 'border-brand-300 ring-1 ring-brand-100 hover:border-brand-500'
+          : 'border-slate-200 hover:border-brand-400'
+      }`}
     >
       <div className="flex items-center gap-2 mb-2">
-        <span className="flex items-center justify-center w-7 h-7 rounded-md bg-brand-50 text-brand-700">{icon}</span>
+        <span className="flex items-center justify-center w-7 h-7 rounded-md bg-brand-50 text-brand-700 shrink-0">
+          {icon}
+        </span>
         <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Etapa {n}</span>
-        {badge && <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">{badge}</span>}
+        {destacada && (
+          <span className="text-[10px] font-medium bg-brand-600 text-white rounded px-1.5 py-0.5">Empezá acá</span>
+        )}
+        <div className="flex-1" />
+        {badge && (
+          <span className="text-[10px] font-mono bg-slate-100 text-slate-500 rounded px-1.5 py-0.5">{badge}</span>
+        )}
       </div>
       <h3 className="text-sm font-semibold text-slate-800 mb-2">{titulo}</h3>
       <dl className="text-[11px] text-slate-500 space-y-1 flex-1">
@@ -66,50 +100,89 @@ export default function Home() {
   const campos = flattenFields(project.form).length;
   const secciones = project.form.sections.length;
   const bindeados = flattenFields(project.form).filter((f) => f.sourceMeta).length;
+  const etapa0 = project.etapa0;
 
   return (
     <div className="h-full overflow-y-auto scroll-thin bg-slate-100">
       <div className="max-w-5xl mx-auto px-6 py-10">
-        <h1 className="text-2xl font-bold text-slate-800">Signframe Form Builder</h1>
-        <p className="text-sm text-slate-500 mt-1">
+        {/* Encabezado */}
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <h1 className="text-2xl font-bold text-slate-800">Signframe Form Builder</h1>
+          <span
+            className="rounded-full bg-slate-800 text-white text-[11px] font-mono px-2 py-0.5"
+            title={BADGE}
+            data-version
+          >
+            v{VERSION}
+          </span>
+        </div>
+        <p className="text-sm text-slate-500 mt-1.5 max-w-2xl">
           Armá el JSON de definición de formularios de Signframe a partir de la ficha del INS y el PDF.
           Elegí por dónde arrancar.
         </p>
 
         {/* Estado actual */}
-        <div className="flex flex-wrap gap-2 mt-4">
-          <Estado hecho={project.sourceFields.length > 0}>
-            Ficha: {project.sourceFields.length > 0 ? `${project.sourceFields.length} campos` : 'sin cargar'}
-          </Estado>
-          <Estado hecho={secciones > 0}>
-            Esqueleto: {secciones > 0 ? `${secciones} secciones · ${campos} campos` : 'vacío'}
-          </Estado>
-          <Estado hecho={project.acroForms.length > 0}>
-            Campos PDF: {project.acroForms.length > 0 ? `${project.acroForms.length}` : 'sin cargar'}
-          </Estado>
-          <Estado hecho={bindeados > 0}>Vinculados: {bindeados}</Estado>
-          <Estado hecho={!!pdfName}>PDF: {pdfName ?? 'sin adjuntar'}</Estado>
+        <div className="mt-5">
+          <h2 className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1.5">
+            Estado del proyecto
+          </h2>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+            <Estado
+              label="Ficha"
+              hecho={project.sourceFields.length > 0}
+              valor={project.sourceFields.length > 0 ? `${project.sourceFields.length} campos` : 'sin cargar'}
+            />
+            <Estado
+              label="Esqueleto"
+              hecho={secciones > 0}
+              valor={secciones > 0 ? `${secciones} secciones · ${campos} campos` : 'vacío'}
+            />
+            <Estado
+              label="Campos PDF"
+              hecho={project.acroForms.length > 0}
+              valor={project.acroForms.length > 0 ? `${project.acroForms.length} campos` : 'sin cargar'}
+            />
+            <Estado label="Vinculados" hecho={bindeados > 0} valor={`${bindeados} con sourceMeta`} />
+            <Estado label="PDF" hecho={!!pdfName} valor={pdfName ?? 'sin adjuntar'} />
+          </div>
         </div>
 
         {/* Aviso duro de Etapa 0 */}
-        <div className="mt-6 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-          <b>Importante:</b> el renombrado del PDF (Etapa 0) va <b>siempre antes</b> de cargar el PDF en Signframe.
-          Si lo cargás primero, el <code>sourceMeta</code> queda clavado a los nombres genéricos del AcroForm.
+        <div className="mt-5 flex gap-2.5 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+          <AlertTriangle size={15} className="shrink-0 mt-0.5 text-amber-600" />
+          <p>
+            <b>El renombrado del PDF (Etapa 0) va siempre antes</b> de cargar el PDF en Signframe. Si lo cargás
+            primero, el <code>sourceMeta</code> queda clavado a los nombres genéricos del AcroForm.
+          </p>
         </div>
 
-        {/* Etapas */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-6">
+        {/* Etapa 0, destacada como punto de entrada */}
+        <div className="mt-6">
           <EtapaCard
             n="0"
             titulo="Renombrado asistido"
             icon={<FileSignature size={15} />}
-            badge="v1.0.0 · análisis"
+            badge={BADGE}
+            destacada
             necesita="Ficha cruda del INS (col N vacía) + PDF crudo"
-            produce="PDF renombrado + ficha con la col N llena"
-            comoSeUsa="Por ahora: análisis de la ficha cruda (hojas, exclusiones y qué fila va al PDF)."
-            cta="Analizar ficha cruda"
+            produce="PDF renombrado + ficha con la col N llena + reporte CSV"
+            comoSeUsa="Adentro: alineación por región, revisión campo por campo, y crear / borrar / trocear campos del PDF."
+            cta={etapa0 ? 'Retomar el renombrado' : 'Empezar el renombrado'}
             onClick={() => setView('etapa0')}
           />
+          {etapa0 && (
+            <p className="text-[11px] text-slate-400 mt-1.5">
+              Hay un renombrado guardado{etapa0.pdfNombre ? ` de «${etapa0.pdfNombre}»` : ''}. Volvé a adjuntar la
+              ficha y el PDF para retomarlo.
+            </p>
+          )}
+        </div>
+
+        {/* Etapas 1–3 */}
+        <h2 className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mt-7 mb-1.5">
+          Después, en el workspace
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <EtapaCard
             n="1"
             titulo="Armar el esqueleto"
