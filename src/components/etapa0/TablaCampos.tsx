@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Wand2, MapPin } from 'lucide-react';
+import { X, Wand2, MapPin, Trash2, Split } from 'lucide-react';
 import type { PdfLeaf } from '../../lib/etapa0/pdfFields';
 import type { Confianza } from '../../lib/etapa0/align';
 import type { NombrePropuesto } from '../../lib/etapa0/acroName';
@@ -39,6 +39,8 @@ export default function TablaCampos({
   selected,
   onSelect,
   query,
+  onBorrar,
+  onReemplazarPorN,
 }: {
   leaves: PdfLeaf[];
   filasPdf: NombrePropuesto[];
@@ -49,6 +51,10 @@ export default function TablaCampos({
   selected: string | null;
   onSelect: (name: string) => void;
   query: string;
+  /** v1.4.4: borrar el campo (detectado o creado) */
+  onBorrar?: (i: number) => void;
+  /** v1.4.4: reemplazar el campo por N cajas dentro de su mismo rect */
+  onReemplazarPorN?: (i: number, n: number) => void;
 }) {
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [verPosiciones, setVerPosiciones] = useState(false);
@@ -101,6 +107,7 @@ export default function TablaCampos({
     return c === 'media' || c === 'revisar';
   }).length;
   const totalWidgets = leaves.reduce((n, l) => n + l.widgets.length, 0);
+  const nCreados = leaves.filter((l) => l.origen === 'creado').length;
 
   return (
     <div className="flex flex-col min-h-0 flex-1">
@@ -110,6 +117,12 @@ export default function TablaCampos({
           <b>{leaves.length}</b> campos ({totalWidgets} widgets) · <b className="text-emerald-700">{renombrados}</b>{' '}
           renombrados · <b className="text-amber-600">{enRevisar}</b> en revisar ·{' '}
           <b className={colisiones.size ? 'text-red-600' : 'text-slate-500'}>{colisiones.size}</b> colisiones
+          {nCreados > 0 && (
+            <>
+              {' '}
+              · <b className="text-brand-700">{nCreados}</b> creados
+            </>
+          )}
         </span>
         <button
           onClick={() => setVerPosiciones((v) => !v)}
@@ -167,7 +180,7 @@ export default function TablaCampos({
               <th className="text-left px-1 py-1 font-medium w-16">Confianza</th>
               <th className="text-left px-1 py-1 font-medium">Fila ficha</th>
               {verPosiciones && <th className="text-left px-1 py-1 font-medium">Posición</th>}
-              <th className="w-6" />
+              <th className="w-14" />
             </tr>
           </thead>
           <tbody>
@@ -188,6 +201,11 @@ export default function TablaCampos({
                   </td>
                   <td className="px-1 py-1 text-right text-slate-400">{leaf.readingIndex}</td>
                   <td className="px-1 py-1 font-mono text-slate-500 truncate max-w-[140px]" title={leaf.name}>
+                    {leaf.origen === 'creado' && (
+                      <span className="mr-1 rounded bg-brand-100 text-brand-700 px-1" title="Campo creado a mano">
+                        nuevo
+                      </span>
+                    )}
                     {leaf.name}
                     {leaf.multiWidgetSospechoso && (
                       <span className="ml-1 rounded bg-amber-100 text-amber-700 px-1" title={`${leaf.widgets.length} widgets en páginas ${leaf.paginas.map((p) => p + 1).join(', ')}`}>
@@ -200,6 +218,8 @@ export default function TablaCampos({
                     <input
                       value={ed?.nombreNuevo ?? ''}
                       placeholder={leaf.name}
+                      data-nombre={leaf.name}
+                      data-efectivo={efectivo}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => patch(i, { nombreNuevo: e.target.value })}
                       className={`w-full rounded border px-1 py-0.5 font-mono ${
@@ -258,7 +278,7 @@ export default function TablaCampos({
                       {Math.round(leaf.rect.w)}×{Math.round(leaf.rect.h)}
                     </td>
                   )}
-                  <td className="px-1">
+                  <td className="px-1 whitespace-nowrap">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -269,6 +289,33 @@ export default function TablaCampos({
                     >
                       <X size={12} />
                     </button>
+                    {onReemplazarPorN && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const n = Number(prompt(`¿En cuántas cajas dividir «${efectivo}»?`, '3'));
+                          if (n >= 2) onReemplazarPorN(i, Math.min(8, n));
+                        }}
+                        data-reemplazar={leaf.name}
+                        className="ml-1 text-slate-300 hover:text-brand-600"
+                        title="Reemplazar por N cajas dentro de su mismo rect"
+                      >
+                        <Split size={12} />
+                      </button>
+                    )}
+                    {onBorrar && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onBorrar(i);
+                        }}
+                        data-borrar={leaf.name}
+                        className="ml-1 text-slate-300 hover:text-red-600"
+                        title="Borrar el campo del PDF de salida"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
                   </td>
                 </tr>
               );

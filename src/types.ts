@@ -249,6 +249,28 @@ export interface Etapa0Edicion {
   manual: boolean;
 }
 
+/**
+ * Campo dibujado a mano sobre el PDF (v1.4.4). El `uid` es su identidad y NO
+ * depende del nombre: si el usuario borra un campo y crea otro con el mismo
+ * nombre, remapear por nombre reengancharía la edición al campo equivocado.
+ */
+export interface Etapa0CampoCreado {
+  uid: string;
+  nombre: string;
+  /** '/Tx' | '/Btn' | '/Sig' */
+  tipo: string;
+  /** 0-based */
+  page: number;
+  /** coordenadas PDF (origen abajo-izquierda) */
+  rect: { x: number; y: number; w: number; h: number };
+  /** `hoja|fila|codigoInstancia` de la fila asignada; null si quedó sin fila */
+  filaClave: string | null;
+  /** uid del grupo cuando el campo salió de trocear un rect en N cajas */
+  grupo?: string;
+  /** posición dentro del grupo troceado (1-based) */
+  parte?: number;
+}
+
 /** Región de una instancia, por NOMBRE de campo: sobrevive a un re-parseo. */
 export interface Etapa0Region {
   codigo: string;
@@ -277,4 +299,8 @@ export interface Etapa0State {
   detalleAbierto?: boolean;
   /** nombres ACTUALES de los campos que el usuario confirmó a mano en la revisión */
   confirmados?: string[];
+  /** campos dibujados a mano (v1.4.4) */
+  camposCreados?: Etapa0CampoCreado[];
+  /** nombres ACTUALES de los campos detectados que el usuario borró */
+  camposBorrados?: string[];
 }

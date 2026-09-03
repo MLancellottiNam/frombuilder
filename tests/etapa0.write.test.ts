@@ -197,14 +197,22 @@ function hojaFicha(): string[][] {
     huerfanosFicha: [np(ficha.rows[1])],
     colisiones: new Set<string>(['padre.hijo']),
     avisosColM: avisos,
+    origenDeLeaf: (i) => (i === 2 ? 'creado' : 'detectado'),
+    borradosDelPdf: ['un_campo_borrado'],
   });
   ok(rep.resumen.asignados === 1, `reporte: 1 asignado (got ${rep.resumen.asignados})`);
   ok(rep.resumen.huerfanosPdf === 2, `reporte: 2 huérfanos PDF (got ${rep.resumen.huerfanosPdf})`);
   ok(rep.resumen.huerfanosFicha === 1, 'reporte: 1 huérfano ficha');
   ok(rep.resumen.colisiones === 1, 'reporte: 1 colisión');
   ok(rep.resumen.avisos === avisos.length, 'reporte: todos los avisos de col M');
-  ok(rep.csv.split('\n')[0].startsWith('seccion,nombre_actual,nombre_nuevo'), 'CSV con header esperado');
+  ok(rep.csv.split('\n')[0].startsWith('seccion,origen,nombre_actual,nombre_nuevo'), 'CSV con header esperado');
   ok(rep.filas.some((f) => f.seccion === 'nota' && /\/Sig/.test(f.detalle)), 'reporte: nota de ausencia de /Sig');
+  ok(rep.resumen.borrados === 1, 'reporte: cuenta los campos borrados');
+  ok(
+    rep.filas.some((f) => f.seccion === 'borrado' && f.nombre_actual === 'un_campo_borrado'),
+    'reporte: el campo borrado sale con su sección',
+  );
+  ok(rep.filas.some((f) => f.origen === 'creado'), 'reporte: los creados se distinguen por origen');
   ok(
     rep.filas.some((f) => f.seccion === 'asignado' && f.detalle.includes('COLISIÓN')),
     'reporte: marca la colisión en la fila del campo',

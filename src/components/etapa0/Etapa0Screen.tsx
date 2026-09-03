@@ -12,7 +12,9 @@ import {
   Search,
   Upload,
 } from 'lucide-react';
+import { nanoid } from 'nanoid';
 import { useStore } from '../../store/store';
+import { BADGE } from '../../version';
 import { Button } from '../ui';
 import { readFichaRaw, norm, type FichaRawResult, type RowDestino } from '../../lib/etapa0/fichaRaw';
 import { readPdfFields, type PdfFieldsResult } from '../../lib/etapa0/pdfFields';
@@ -46,8 +48,17 @@ import { escribirFichaConColN, detectarAvisosColM, etiquetaAviso, type ValoresCo
 import { construirReporte } from '../../lib/etapa0/reporte';
 import { downloadCsv } from '../../lib/matrixOut';
 import { slugify } from '../../lib/exporter';
+import {
+  aplicarCambios,
+  claveEstable,
+  remapearPorClave,
+  trocearRect,
+  type CampoCreado,
+} from '../../lib/etapa0/camposManuales';
+import { sufijosDeFormato } from '../../lib/etapa0/regiones';
 import TablaCampos, { nombreEfectivo, type Ediciones } from './TablaCampos';
 import ModoRevision from './ModoRevision';
+import PanelCrearCampo, { type DatosCampoNuevo } from './PanelCrearCampo';
 import PdfPreview from './PdfPreview';
 
 /** Clave estable de una fila de ficha (sobrevive a reordenamientos). */
@@ -135,6 +146,9 @@ export default function Etapa0Screen() {
   const [revIdx, setRevIdx] = useState(0);
   /** nombres ACTUALES de campos que el usuario confirmó a mano en la revisión */
   const [confirmados, setConfirmados] = useState<Set<string>>(new Set());
+  const [creados, setCreados] = useState<CampoCreado[]>([]);
+  const [borrados, setBorrados] = useState<string[]>([]);
+  const [dibujo, setDibujo] = useState<{ page: number; rect: { x: number; y: number; w: number; h: number } } | null>(null);
 
   const onFicha = async () => {
     const f = fichaInput.current?.files?.[0];
@@ -185,6 +199,34 @@ export default function Etapa0Screen() {
     if (pdfInput.current) pdfInput.current.value = '';
   };
 
+  /**
+   * Lista EFECTIVA de campos: detectados − borrados + creados, reordenada por
+   * orden de lectura. Es la que ve la UI, la que se alinea y la que se escribe.
+   */
+  const cambios = useMemo(
+    () => (pdf ? aplicarCambios(pdf.leaves, creados, borrados) : null),
+    [pdf, creados, borrados],
+  );
+  const leaves = cambios?.efectivos ?? [];
+
+  /**
+   * Crear o borrar un campo corre TODOS los índices, y `ediciones` está indexada
+   * por posición: sin remapear, el nombre nuevo se mudaría de campo en silencio.
+   * El remapeo va por identidad estable (uid para los creados, AcroName original
+   * para los detectados), así que también sobrevive al caso de borrar un campo y
+   * crear otro con el mismo nombre.
+   */
+  const leavesPrevios = useRef<typeof leaves>([]);
+  useEffect(() => {
+    const antes = leavesPrevios.current;
+    leavesPrevios.current = leaves;
+    if (antes.length === 0 || antes === leaves) return;
+    const mismos =
+      antes.length === leaves.length && antes.every((l, i) => claveEstable(l) === claveEstable(leaves[i]));
+    if (mismos) return;
+    setEdiciones((prev) => remapearPorClave(prev, antes, leaves));
+  }, [leaves]);
+
   const nombres = useMemo(() => {
     if (!ficha) return [];
     const expandidas = hojasBloque.length
@@ -231,7 +273,7 @@ export default function Etapa0Screen() {
 
   const siembra = useMemo(() => {
     if (!pdf || activas.length === 0 || textoPdf.length === 0) return null;
-    return sembrarRegiones(pdf.leaves, textoPdf, activas, gruposBloque);
+    return sembrarRegiones(leaves, textoPdf, activas, gruposBloque);
   }, [pdf, textoPdf, activas, gruposBloque]);
 
   // Las regiones sembradas son ORIENTATIVAS: entran como estado editable y las
@@ -259,7 +301,7 @@ export default function Etapa0Screen() {
   const elegibilidad = useMemo(() => {
     if (!pdf || regiones.length === 0 || textoPdf.length === 0) return null;
     return elegibilidadPorRegion(
-      pdf.leaves,
+      leaves,
       regiones,
       textoPdf,
       filasPdf
@@ -276,7 +318,7 @@ export default function Etapa0Screen() {
   const segmentos = useMemo<Segmento[]>(() => {
     if (!pdf || regiones.length === 0) return [];
     const segs = construirSegmentos(
-      pdf.leaves.length,
+      leaves.length,
       regiones,
       filasPdf.map((n) => {
         if (!n.fila.instancia || !elegibilidad) return { codigo: n.fila.instancia?.codigo ?? null };
@@ -296,8 +338,9 @@ export default function Etapa0Screen() {
         // de un grupo: es la misma señal con la que se armó el nombre.
         esOpcion: !!filasPdf[i].partes.sufijo,
         grupo: filasPdf[i].partes.base,
+        tipo: filasPdf[i].fila.tipo,
       }));
-      const r = anclasDeTexto(fa, pdf.leaves, seg.leafIdxs, textoPdf);
+      const r = anclasDeTexto(fa, leaves, seg.leafIdxs, textoPdf);
       seg.anclas = r.anclas;
       // `opcionesForaneas` NO se aplica: desde v1.4.3 lo hace `elegibilidad`,
       // que además distingue "vive en otra región" de "se llama distinto en el
@@ -314,25 +357,115 @@ export default function Etapa0Screen() {
       tipo: n.fila.tipo,
       nombrePropuesto: n.nombre,
     }));
-    if (segmentos.length === 0) return alinear(alineables, pdf.leaves);
+    if (segmentos.length === 0) return alinear(alineables, leaves);
     // Con regiones se alinea por segmentos, y se degrada a «revisar» todo par
     // del que haya evidencia POSITIVA de que está mal.
     const esOpcion = (i: number) => !!filasPdf[i].partes.sufijo;
     const entrada = {
-      leaves: pdf.leaves,
+      leaves: leaves,
       texto: textoPdf,
       bandas,
       claveDeFila: (k: number) => (esOpcion(k) ? filasPdf[k].fila.valor : filasPdf[k].fila.nombrePdf),
       grupoDeFila: (k: number) => (esOpcion(k) ? filasPdf[k].fila.nombrePdf : ''),
       filasDelSegmento: (k: number) => segmentos.find((sg) => sg.filaIdxs.includes(k))?.filaIdxs ?? [],
     };
-    return alinearPorSegmentos(alineables, pdf.leaves, segmentos, {
+    return alinearPorSegmentos(alineables, leaves, segmentos, {
       // Solo la evidencia PRECISA penaliza dentro del DP; la de banda es más
       // gruesa y como penalidad dura dejaba campos buenos sin asignar.
       evidenciaFuerte: (i, j) => evidenciaFuerte(entrada, i, j),
       evidenciaEnContra: (i, j) => evidenciaEnContra(entrada, i, j),
     });
   }, [pdf, filasPdf, segmentos, textoPdf, bandas]);
+
+  // --- v1.4.4: crear, borrar y trocear campos -----------------------------
+
+  /** Filas elegibles en la región donde cae un punto del PDF. */
+  const filasParaDibujo = useMemo(() => {
+    const todas = filasPdf.map((np, idx) => ({ idx, np }));
+    if (!dibujo || segmentos.length === 0) return todas;
+    const j = leaves.findIndex(
+      (l) =>
+        l.page === dibujo.page &&
+        l.rect.y <= dibujo.rect.y + dibujo.rect.h + 20 &&
+        l.rect.y + l.rect.h >= dibujo.rect.y - 20,
+    );
+    const seg = j >= 0 ? segmentos.find((sg) => sg.leafIdxs.includes(j)) : undefined;
+    if (!seg) return todas;
+    const permitidas = new Set(seg.filaIdxs);
+    const filtradas = todas.filter((x) => permitidas.has(x.idx));
+    return filtradas.length > 0 ? filtradas : todas;
+  }, [dibujo, filasPdf, segmentos, leaves]);
+
+  /** Crea 1 o N campos a partir del rect dibujado. */
+  const crearCampos = (d: DatosCampoNuevo, rect: { x: number; y: number; w: number; h: number }, page: number) => {
+    const np = d.filaIdx == null ? null : filasPdf[d.filaIdx];
+    const filaClave = np ? claveFila(np.fila.hoja, np.fila.fila, np.fila.instancia?.codigo) : null;
+    const cajas = trocearRect(rect, d.dividir);
+    const sufijos = np ? sufijosDeFormato(np.fila.valor, d.dividir) : undefined;
+    const grupo = d.dividir > 1 ? nanoid(6) : undefined;
+    const nuevos: CampoCreado[] = cajas.map((r, i) => ({
+      uid: nanoid(8),
+      nombre: d.dividir > 1 ? `${d.nombre}_${sufijos?.[i] ?? i + 1}` : d.nombre,
+      tipo: d.tipo,
+      page,
+      rect: r,
+      filaClave,
+      grupo,
+      parte: d.dividir > 1 ? i + 1 : undefined,
+    }));
+    setCreados((prev) => [...prev, ...nuevos]);
+    setDibujo(null);
+    setDescargas((x) => ({ ...x, pdf: false }));
+  };
+
+  /** Borra un campo. Los detectados piden confirmación explícita. */
+  const borrarCampo = (i: number) => {
+    const l = leaves[i];
+    if (!l) return;
+    if (l.origen === 'creado' && l.uid) {
+      setCreados((prev) => prev.filter((c) => c.uid !== l.uid));
+    } else {
+      if (
+        !confirm(
+          `¿Borrar el campo «${l.name}»?\n\nSe elimina del PDF de salida. Es reversible con «Restaurar campos borrados».`,
+        )
+      )
+        return;
+      setBorrados((prev) => (prev.includes(l.name) ? prev : [...prev, l.name]));
+    }
+    setDescargas((x) => ({ ...x, pdf: false }));
+  };
+
+  /**
+   * Reemplaza un campo por N cajas dentro de su mismo rect, heredando su fila.
+   * Es el caso de la fecha del CSC en un paso: el asegurado tiene una caja de
+   * 88pt donde el representante tiene tres, y así quedan iguales.
+   */
+  const reemplazarPorN = (i: number, n: number) => {
+    const l = leaves[i];
+    if (!l || n < 2) return;
+    const ed = ediciones[i];
+    const np = ed?.filaIdx == null ? null : filasPdf[ed.filaIdx];
+    const base = nombreEfectivo(l, ed);
+    const sufijos = np ? sufijosDeFormato(np.fila.valor, n) : undefined;
+    const grupo = nanoid(6);
+    const nuevos: CampoCreado[] = trocearRect(l.rect, n).map((r, k) => ({
+      uid: nanoid(8),
+      nombre: `${base}_${sufijos?.[k] ?? k + 1}`,
+      tipo: l.ft,
+      page: l.page,
+      rect: r,
+      filaClave: np ? claveFila(np.fila.hoja, np.fila.fila, np.fila.instancia?.codigo) : null,
+      grupo,
+      parte: k + 1,
+    }));
+    if (l.origen === 'creado' && l.uid) setCreados((prev) => [...prev.filter((c) => c.uid !== l.uid), ...nuevos]);
+    else {
+      setBorrados((prev) => (prev.includes(l.name) ? prev : [...prev, l.name]));
+      setCreados((prev) => [...prev, ...nuevos]);
+    }
+    setDescargas((x) => ({ ...x, pdf: false }));
+  };
 
   /** Mueve un borde de región a mano. Queda marcada como `manual` y no se pisa. */
   const moverRegion = (i: number, campo: 'desdeLeaf' | 'hastaLeaf', valor: number) =>
@@ -378,11 +511,16 @@ export default function Etapa0Screen() {
           if (next[li]?.manual) return;
           // En una relación 1:N cada caja necesita nombre propio; se numeran por
           // posición (estructural, no es desambiguación de colisión).
-          const nombre = propuesto && a.leafIdx.length > 1 ? `${propuesto}_${parte + 1}` : propuesto;
+          // En una relación 1:N cada caja necesita nombre propio. El sufijo sale
+          // del formato de la fila cuando se puede derivar (`dd/mm/aaaa` ->
+          // dia/mes/ano) y si no es posicional. Es estructural y editable, no
+          // desambiguación de colisión.
+          const sufijo = a.sufijos?.[parte] ?? String(parte + 1);
+          const nombre = propuesto && a.leafIdx.length > 1 ? `${propuesto}_${sufijo}` : propuesto;
           next[li] = {
             nombreNuevo: nombre,
             filaIdx: a.filaIdx,
-            tipo: pdf.leaves[li].ft,
+            tipo: leaves[li].ft,
             manual: false,
           };
         });
@@ -394,7 +532,7 @@ export default function Etapa0Screen() {
   /** Nombre final de cada campo (editado o el actual) + colisiones. */
   const colisionesPdf = useMemo(() => {
     const cuenta = new Map<string, number>();
-    (pdf?.leaves ?? []).forEach((l, i) => {
+    (leaves).forEach((l, i) => {
       const n = nombreEfectivo(l, ediciones[i]);
       cuenta.set(n, (cuenta.get(n) ?? 0) + 1);
     });
@@ -404,7 +542,7 @@ export default function Etapa0Screen() {
   /** leafName(actual) -> nombre final, para el badge del overlay. */
   const nombreFinalPorLeaf = useMemo(() => {
     const m = new Map<string, string>();
-    (pdf?.leaves ?? []).forEach((l, i) => m.set(l.name, nombreEfectivo(l, ediciones[i])));
+    (leaves).forEach((l, i) => m.set(l.name, nombreEfectivo(l, ediciones[i])));
     return m;
   }, [pdf, ediciones]);
 
@@ -413,7 +551,7 @@ export default function Etapa0Screen() {
     const m = new Map<string, Confianza>();
     if (!align || !pdf) return m;
     for (const a of align.asignaciones) {
-      for (const li of a.leafIdx) m.set(pdf.leaves[li].name, a.confianza);
+      for (const li of a.leafIdx) m.set(leaves[li].name, a.confianza);
     }
     return m;
   }, [align, pdf]);
@@ -439,7 +577,7 @@ export default function Etapa0Screen() {
    */
   const pendientes = useMemo(() => {
     if (!pdf) return [];
-    return pdf.leaves
+    return leaves
       .map((l, i) => ({ l, i }))
       .filter(({ l }) => {
         if (confirmados.has(l.name)) return false;
@@ -497,7 +635,7 @@ export default function Etapa0Screen() {
   useEffect(() => {
     if (!modoRevision || !pdf) return;
     const i = pendientes[Math.min(revIdx, Math.max(0, pendientes.length - 1))];
-    if (i != null) setSelected(pdf.leaves[i].name);
+    if (i != null) setSelected(leaves[i].name);
   }, [modoRevision, revIdx, pendientes, pdf]);
 
   /** leafIdx -> asignación de la pre-alineación (para el reporte). */
@@ -533,18 +671,31 @@ export default function Etapa0Screen() {
     setError(null);
     try {
       const renombres = new Map<string, string>();
-      pdf.leaves.forEach((l, i) => {
+      // Los creados llevan su nombre final en la definición que se manda a
+      // escribir, así que acá solo van los renombres de los detectados.
+      const creadosFinales: CampoCreado[] = [];
+      leaves.forEach((l, i) => {
         const final = nombreEfectivo(l, ediciones[i]);
+        if (l.origen === 'creado' && l.uid) {
+          const c = creados.find((x) => x.uid === l.uid);
+          if (c) creadosFinales.push({ ...c, nombre: final });
+          return;
+        }
         if (final !== l.name) renombres.set(l.name, final);
       });
       const r = await escribirPdfRenombrado(await pdfFile.arrayBuffer(), renombres, {
         limitarFuente,
         tamanoFuente,
+        creados: creadosFinales,
+        borrados,
       });
       descargarBytes(r.bytes, `${baseNombre}-renombrado.pdf`, 'application/pdf');
       setDescargas((d) => ({ ...d, pdf: true }));
       setAvisoEscritura(
-        `PDF escrito: ${r.renombrados} de ${r.campos} campos renombrados, ${r.limpiados} con valor borrado.` +
+        `PDF escrito: ${r.renombrados} de ${r.campos} campos renombrados, ${r.limpiados} con valor borrado` +
+          (r.creados ? `, ${r.creados} creados` : '') +
+          (r.borrados ? `, ${r.borrados} borrados` : '') +
+          '.' +
           (r.warnings.length ? ' · ' + r.warnings.join(' · ') : ''),
       );
     } catch (e) {
@@ -563,7 +714,7 @@ export default function Etapa0Screen() {
       // también las instancias, que comparten la fila de origen). Se listan
       // todos separados por coma: la col N tiene que decir la verdad completa.
       const porFila = new Map<string, { hoja: string; fila: number; nombres: string[] }>();
-      pdf.leaves.forEach((l, i) => {
+      leaves.forEach((l, i) => {
         const np = filaDeLeaf(i);
         if (!np) return;
         const k = claveFila(np.fila.hoja, np.fila.fila);
@@ -597,8 +748,10 @@ export default function Etapa0Screen() {
   const doDescargarReporte = () => {
     if (!pdf) return;
     const rep = construirReporte({
-      leaves: pdf.leaves,
-      nombreFinal: (i) => nombreEfectivo(pdf.leaves[i], ediciones[i]),
+      leaves: leaves,
+      nombreFinal: (i) => nombreEfectivo(leaves[i], ediciones[i]),
+      origenDeLeaf: (i) => (leaves[i].origen === 'creado' ? 'creado' : 'detectado'),
+      borradosDelPdf: borrados,
       filaDeLeaf,
       confianzaDeLeaf: (i) => asigPorLeaf.get(i)?.confianza,
       motivosDeLeaf: (i) => asigPorLeaf.get(i)?.motivos ?? [],
@@ -633,6 +786,8 @@ export default function Etapa0Screen() {
     setTamanoFuente(g.tamanoFuente);
     if (g.detalleAbierto != null) setDetalleAbierto(g.detalleAbierto);
     if (g.confirmados?.length) setConfirmados(new Set(g.confirmados));
+    if (g.camposCreados?.length) setCreados(g.camposCreados);
+    if (g.camposBorrados?.length) setBorrados(g.camposBorrados);
   }, [ficha, etapa0Guardado]);
 
   // Hidratar ediciones cuando entra el PDF (se re-atan por nombre y por clave
@@ -645,7 +800,7 @@ export default function Etapa0Screen() {
     // Regiones guardadas a mano: se re-atan por nombre de campo.
     const guardadasManual = (g.regiones ?? []).filter((r) => r.manual);
     if (guardadasManual.length) {
-      const idxDe = new Map(pdf.leaves.map((l, i) => [l.name, i]));
+      const idxDe = new Map(leaves.map((l, i) => [l.name, i]));
       setRegiones(
         guardadasManual
           .map((r) => ({
@@ -662,7 +817,7 @@ export default function Etapa0Screen() {
     const porClave = new Map(filasPdf.map((n, i) => [claveFila(n.fila.hoja, n.fila.fila, n.fila.instancia?.codigo), i]));
     setEdiciones((prev) => {
       const next: Ediciones = { ...prev };
-      pdf.leaves.forEach((l, i) => {
+      leaves.forEach((l, i) => {
         const e = g.ediciones[l.name];
         if (!e) return;
         next[i] = {
@@ -680,7 +835,7 @@ export default function Etapa0Screen() {
   useEffect(() => {
     if (!ficha && !pdf) return;
     const eds: Record<string, import('../../types').Etapa0Edicion> = {};
-    (pdf?.leaves ?? []).forEach((l, i) => {
+    (leaves).forEach((l, i) => {
       const e = ediciones[i];
       if (!e) return;
       const np = e.filaIdx == null ? null : filasPdf[e.filaIdx];
@@ -711,10 +866,12 @@ export default function Etapa0Screen() {
       reporteDescargado: descargas.reporte,
       detalleAbierto,
       confirmados: [...confirmados],
+      camposCreados: creados,
+      camposBorrados: borrados,
     });
   }, [
     ficha, pdf, fichaFile, pdfFile, hojaInstanciable, hojasBloque, instancias, regiones, ediciones, filasPdf,
-    limitarFuente, tamanoFuente, descargas, detalleAbierto, confirmados, setEtapa0,
+    limitarFuente, tamanoFuente, descargas, detalleAbierto, confirmados, creados, borrados, setEtapa0,
   ]);
 
   const filasFicha = useMemo(() => {
@@ -769,7 +926,7 @@ export default function Etapa0Screen() {
         <span className="font-bold text-slate-800 flex items-center gap-1.5">
           <FileSignature size={16} /> Etapa 0 · Renombrado asistido
         </span>
-        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">v1.4.2 · pantalla</span>
+        <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">{BADGE}</span>
         <div className="flex-1" />
         <input ref={fichaInput} type="file" accept=".xlsx,.xls" hidden onChange={onFicha} />
         <input ref={pdfInput} type="file" accept="application/pdf,.pdf" hidden onChange={onPdf} />
@@ -802,7 +959,7 @@ export default function Etapa0Screen() {
 
           {ficha && pdf && modoRevision && (
             <ModoRevision
-              leaves={pdf.leaves}
+              leaves={leaves}
               filasPdf={filasPdf}
               pendientes={pendientes}
               idx={Math.min(revIdx, Math.max(0, pendientes.length - 1))}
@@ -816,6 +973,38 @@ export default function Etapa0Screen() {
               onConfirmar={confirmar}
               onSalir={() => setModoRevision(false)}
             />
+          )}
+
+          {/* Panel de creación: aparece al soltar el rectángulo dibujado */}
+          {dibujo && (
+            <PanelCrearCampo
+              page={dibujo.page}
+              rect={dibujo.rect}
+              filas={filasParaDibujo}
+              onCrear={(d) => crearCampos(d, dibujo.rect, dibujo.page)}
+              onCancelar={() => setDibujo(null)}
+            />
+          )}
+
+          {borrados.length > 0 && (
+            <div className="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-800">
+              <span data-borrados>
+                <b>{borrados.length} campo(s) borrado(s)</b> — no van a estar en el PDF de salida:{' '}
+                {borrados.slice(0, 4).join(' · ')}
+                {borrados.length > 4 ? ' …' : ''}
+              </span>
+              <div className="flex-1" />
+              <button
+                onClick={() => {
+                  setBorrados([]);
+                  setDescargas((x) => ({ ...x, pdf: false }));
+                }}
+                data-restaurar
+                className="rounded border border-amber-400 bg-white px-2 py-0.5 text-amber-800 whitespace-nowrap"
+              >
+                Restaurar campos borrados
+              </button>
+            </div>
           )}
 
           {/* --- RESUMEN: el estado en tres líneas, no el razonamiento --- */}
@@ -976,7 +1165,13 @@ export default function Etapa0Screen() {
                   )}
                   {pdf && (
                     <>
-                      <Stat n={pdf.leaves.length} l="campos PDF" tone="text-brand-700" />
+                      <Stat n={leaves.length} l="campos PDF" tone="text-brand-700" />
+                      {cambios && cambios.creados > 0 && (
+                        <Stat n={cambios.creados} l="creados" tone="text-brand-700" />
+                      )}
+                      {cambios && cambios.borrados > 0 && (
+                        <Stat n={cambios.borrados} l="borrados" tone="text-amber-600" />
+                      )}
                       <Stat n={pdf.totalWidgets} l="widgets" />
                       <Stat n={pdf.pageCount} l="páginas" />
                       <Stat
@@ -1143,7 +1338,7 @@ export default function Etapa0Screen() {
                               onChange={(e) => moverRegion(i, 'desdeLeaf', Number(e.target.value))}
                               className="rounded border border-slate-300 px-1 py-0.5 max-w-[200px]"
                             >
-                              {pdf.leaves.map((l, j) => (
+                              {leaves.map((l, j) => (
                                 <option key={j} value={j}>
                                   #{l.readingIndex} p{l.page + 1} · {l.name}
                                 </option>
@@ -1156,7 +1351,7 @@ export default function Etapa0Screen() {
                               onChange={(e) => moverRegion(i, 'hastaLeaf', Number(e.target.value))}
                               className="rounded border border-slate-300 px-1 py-0.5 max-w-[200px]"
                             >
-                              {pdf.leaves.map((l, j) => (
+                              {leaves.map((l, j) => (
                                 <option key={j} value={j}>
                                   #{l.readingIndex} p{l.page + 1} · {l.name}
                                 </option>
@@ -1202,7 +1397,7 @@ export default function Etapa0Screen() {
                         onClick={() => setTab('pdf')}
                         className={`text-xs rounded px-2 py-1 ${tab === 'pdf' ? 'bg-brand-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
                       >
-                        Campos PDF {pdf ? `(${pdf.leaves.length})` : ''}
+                        Campos PDF {pdf ? `(${leaves.length})` : ''}
                       </button>
                     </div>
                     <div className="relative flex-1">
@@ -1306,7 +1501,7 @@ export default function Etapa0Screen() {
                       <p className="text-xs text-slate-400 p-4 text-center">Cargá el PDF crudo.</p>
                     ) : (
                       <TablaCampos
-                        leaves={pdf.leaves}
+                        leaves={leaves}
                         filasPdf={filasPdf}
                         ediciones={ediciones}
                         setEdiciones={setEdiciones}
@@ -1315,6 +1510,8 @@ export default function Etapa0Screen() {
                         selected={selected}
                         onSelect={setSelected}
                         query={q}
+                        onBorrar={borrarCampo}
+                        onReemplazarPorN={reemplazarPorN}
                       />
                     ))}
                 </div>
@@ -1335,7 +1532,7 @@ export default function Etapa0Screen() {
         <div className="w-1/2 min-w-0 rounded-md border border-slate-200 bg-white">
           <PdfPreview
             file={pdfFile}
-            leaves={pdf?.leaves ?? []}
+            leaves={leaves}
             regiones={regiones}
             regionPorLeaf={regionPorLeaf}
             selected={selected}
@@ -1344,6 +1541,8 @@ export default function Etapa0Screen() {
             nombreFinal={nombreFinalPorLeaf}
             colisiones={colisionesPdf}
             escalaMinima={modoRevision ? 1.75 : undefined}
+            onDibujar={(page, rect) => setDibujo({ page, rect })}
+            esCreado={(nombre) => leaves.some((l) => l.name === nombre && l.origen === 'creado')}
           />
         </div>
       </div>

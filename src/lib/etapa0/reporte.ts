@@ -22,10 +22,13 @@ export type SeccionReporte =
   | 'huerfano-ficha'
   | 'colision'
   | 'aviso-col-m'
+  | 'borrado'
   | 'nota';
 
 export interface FilaReporte {
   seccion: SeccionReporte;
+  /** de dónde salió el campo: detectado en el PDF, creado a mano, o borrado */
+  origen: string;
   nombre_actual: string;
   nombre_nuevo: string;
   tipo: string;
@@ -42,6 +45,7 @@ export interface FilaReporte {
 
 const HEADERS: (keyof FilaReporte)[] = [
   'seccion',
+  'origen',
   'nombre_actual',
   'nombre_nuevo',
   'tipo',
@@ -59,6 +63,7 @@ const HEADERS: (keyof FilaReporte)[] = [
 function vacia(seccion: SeccionReporte): FilaReporte {
   return {
     seccion,
+    origen: '',
     nombre_actual: '',
     nombre_nuevo: '',
     tipo: '',
@@ -89,6 +94,10 @@ export interface EntradaReporte {
   /** nombres finales duplicados */
   colisiones: Set<string>;
   avisosColM: AvisoColM[];
+  /** índice de leaf -> 'detectado' | 'creado' (v1.4.4) */
+  origenDeLeaf?: (i: number) => string;
+  /** nombres de los campos detectados que se borraron */
+  borradosDelPdf?: string[];
 }
 
 export interface Reporte {
@@ -100,6 +109,7 @@ export interface Reporte {
     huerfanosFicha: number;
     colisiones: number;
     avisos: number;
+    borrados: number;
   };
 }
 
@@ -112,6 +122,7 @@ export function construirReporte(e: EntradaReporte): Reporte {
     const np = e.filaDeLeaf(i);
     const final = e.nombreFinal(i);
     const f = vacia(np ? 'asignado' : 'huerfano-pdf');
+    f.origen = e.origenDeLeaf?.(i) ?? 'detectado';
     f.nombre_actual = leaf.name;
     f.nombre_nuevo = final;
     f.tipo = leaf.ft;
@@ -142,6 +153,7 @@ export function construirReporte(e: EntradaReporte): Reporte {
 
   for (const np of e.huerfanosFicha) {
     const f = vacia('huerfano-ficha');
+    f.origen = 'ficha';
     f.nombre_nuevo = np.nombre;
     f.tipo = np.fila.tipo;
     f.hoja = np.fila.hoja;
@@ -149,6 +161,14 @@ export function construirReporte(e: EntradaReporte): Reporte {
     f.instancia = np.fila.instancia ? `${np.fila.instancia.codigo}[${np.fila.indiceInstancia}]` : '';
     f.campo_json = np.fila.campoJson;
     f.detalle = `fila de ficha sin campo en el PDF (col C: «${np.fila.nombrePdf}»)`;
+    filas.push(f);
+  }
+
+  for (const nombre of e.borradosDelPdf ?? []) {
+    const f = vacia('borrado');
+    f.origen = 'borrado';
+    f.nombre_actual = nombre;
+    f.detalle = 'el usuario lo quitó del PDF de salida';
     filas.push(f);
   }
 
@@ -189,6 +209,7 @@ export function construirReporte(e: EntradaReporte): Reporte {
       huerfanosFicha: e.huerfanosFicha.length,
       colisiones: e.colisiones.size,
       avisos: e.avisosColM.length,
+      borrados: (e.borradosDelPdf ?? []).length,
     },
   };
 }

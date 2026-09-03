@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, ZoomIn, ZoomOut } from 'lucide-react';
 import type { PdfLeaf } from '../../lib/etapa0/pdfFields';
 import { colorRegion, type Region } from '../../lib/etapa0/regiones';
 
@@ -36,6 +36,8 @@ export default function PdfPreview({
   regiones,
   regionPorLeaf,
   escalaMinima,
+  onDibujar,
+  esCreado,
 }: {
   file: File | null;
   leaves: PdfLeaf[];
@@ -52,6 +54,14 @@ export default function PdfPreview({
   /** leafIdx -> código de instancia */
   regionPorLeaf?: Map<number, string>;
   /**
+   * Se llama al soltar el rectángulo dibujado, con el rect ya en coordenadas
+   * PDF (origen abajo-izquierda) y la página 0-based. Si no se pasa, el modo
+   * dibujo no está disponible.
+   */
+  onDibujar?: (page: number, rect: { x: number; y: number; w: number; h: number }) => void;
+  /** distintivo de los campos creados a mano: borde punteado */
+  esCreado?: (leafName: string) => boolean;
+  /**
    * Zoom mínimo garantizado. El modo revisión lo sube para que se lea la
    * etiqueta impresa alrededor del campo, que es lo que permite decidir de un
    * vistazo si el nombre está bien.
@@ -66,6 +76,10 @@ export default function PdfPreview({
   const [scale, setScale] = useState(1.25);
   const [boxes, setBoxes] = useState<Box[]>([]);
   const [bandas, setBandas] = useState<Banda[]>([]);
+  const [dibujando, setDibujando] = useState(false);
+  /** rect en píxeles del canvas mientras se arrastra */
+  const [trazo, setTrazo] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const viewportRef = useRef<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -115,6 +129,7 @@ export default function PdfPreview({
       const p = await doc.getPage(page);
       if (cancelled) return;
       const viewport = p.getViewport({ scale });
+      viewportRef.current = viewport;
       canvas.width = Math.floor(viewport.width);
       canvas.height = Math.floor(viewport.height);
       const ctx = canvas.getContext('2d')!;
@@ -173,6 +188,18 @@ export default function PdfPreview({
     if (escalaMinima != null) setScale((s) => (s < escalaMinima ? escalaMinima : s));
   }, [escalaMinima]);
 
+  // Esc sale del modo dibujo y cancela el trazo en curso.
+  useEffect(() => {
+    if (!dibujando) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setTrazo(null);
+      setDibujando(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dibujando]);
+
   // Al seleccionar desde la tabla: saltar a su página y hacer scroll.
   useEffect(() => {
     if (!selected) return;
@@ -188,6 +215,49 @@ export default function PdfPreview({
   // Todos sus widgets se resaltan; los de otra página no se ven en este canvas.
   const selLeaf = selected ? leaves.find((l) => l.name === selected) : undefined;
   const selMultiPagina = selLeaf && selLeaf.paginas.length > 1 ? selLeaf.paginas.map((x) => x + 1) : null;
+
+  /** Convierte el trazo (píxeles del canvas) a coordenadas PDF. */
+  const trazoAPdf = (t: { x0: number; y0: number; x1: number; y1: number }) => {
+    const vp = viewportRef.current;
+    if (!vp) return null;
+    // `convertToPdfPoint` deshace la escala y el flip vertical, así que el rect
+    // sale en coordenadas de página con origen abajo-izquierda y no depende del
+    // zoom con el que se dibujó.
+    const [ax, ay] = vp.convertToPdfPoint(t.x0, t.y0);
+    const [bx, by] = vp.convertToPdfPoint(t.x1, t.y1);
+    const x = Math.min(ax, bx);
+    const y = Math.min(ay, by);
+    const w = Math.abs(bx - ax);
+    const h = Math.abs(by - ay);
+    return { x, y, w, h };
+  };
+
+  const posEnCanvas = (e: React.MouseEvent) => {
+    const c = canvasRef.current;
+    if (!c) return { x: 0, y: 0 };
+    const r = c.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (!dibujando) return;
+    e.preventDefault();
+    const p = posEnCanvas(e);
+    setTrazo({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+  };
+  const onMouseMove = (e: React.MouseEvent) => {
+    if (!dibujando || !trazo) return;
+    const p = posEnCanvas(e);
+    setTrazo({ ...trazo, x1: p.x, y1: p.y });
+  };
+  const onMouseUp = () => {
+    if (!dibujando || !trazo) return;
+    const rect = trazoAPdf(trazo);
+    setTrazo(null);
+    setDibujando(false);
+    // Un click sin arrastre no es un campo.
+    if (rect && rect.w >= 4 && rect.h >= 4) onDibujar?.(page - 1, rect);
+  };
 
   if (!file) {
     return (
@@ -225,6 +295,21 @@ export default function PdfPreview({
         <button onClick={() => setScale((s) => Math.min(3, s + 0.25))} className="p-1 rounded hover:bg-slate-100">
           <ZoomIn size={15} />
         </button>
+        {onDibujar && (
+          <button
+            onClick={() => {
+              setTrazo(null);
+              setDibujando((v) => !v);
+            }}
+            data-dibujar
+            className={`inline-flex items-center gap-1 rounded px-2 py-0.5 border text-[11px] ${
+              dibujando ? 'bg-brand-600 text-white border-brand-600' : 'bg-white border-slate-300 text-slate-600'
+            }`}
+            title="Dibujá un rectángulo sobre el preview para crear el campo (Esc cancela)"
+          >
+            <Plus size={12} /> {dibujando ? 'Dibujá el rectángulo…' : 'Agregar campo'}
+          </button>
+        )}
         <span className="text-slate-400 ml-2">{boxes.length} widgets en esta página</span>
         {selMultiPagina && (
           <span className="ml-2 rounded bg-amber-100 text-amber-800 px-1.5 py-0.5 text-[10px]">
@@ -236,8 +321,20 @@ export default function PdfPreview({
       {error && <p className="text-xs text-red-600 p-3">No se pudo renderizar: {error}</p>}
       {loading && <p className="text-xs text-slate-500 p-3">Cargando PDF…</p>}
 
+      {dibujando && (
+        <p className="px-3 py-1 text-[11px] bg-brand-50 text-brand-800 border-b border-brand-200" data-aviso-dibujo>
+          Dibujá un rectángulo sobre el preview para crear el campo. <b>Esc</b> cancela.
+        </p>
+      )}
+
       <div ref={wrapRef} className="flex-1 overflow-auto scroll-thin bg-slate-200 p-3">
-        <div className="relative inline-block shadow-sm" style={{ lineHeight: 0 }}>
+        <div
+          className={`relative inline-block shadow-sm ${dibujando ? 'cursor-crosshair' : ''}`}
+          style={{ lineHeight: 0 }}
+          onMouseDown={onMouseDown}
+          onMouseMove={onMouseMove}
+          onMouseUp={onMouseUp}
+        >
           <canvas ref={canvasRef} className="block bg-white" />
           {bandas.map((b) => (
             <div
@@ -260,6 +357,17 @@ export default function PdfPreview({
               </span>
             </div>
           ))}
+          {trazo && (
+            <div
+              className="absolute border-2 border-brand-600 bg-brand-500/20 pointer-events-none"
+              style={{
+                left: Math.min(trazo.x0, trazo.x1),
+                top: Math.min(trazo.y0, trazo.y1),
+                width: Math.abs(trazo.x1 - trazo.x0),
+                height: Math.abs(trazo.y1 - trazo.y0),
+              }}
+            />
+          )}
           {boxes.map((b, i) => {
             const isSel = b.leaf.name === selected;
             // alta=azul · media/revisar=ámbar · sin asignar=gris
@@ -293,8 +401,10 @@ export default function PdfPreview({
                   : '')
               }
                 onClick={() => onSelect(b.leaf.name)}
-                className={`absolute border transition-colors ${
-                  isSel ? 'border-brand-600 bg-brand-500/30 ring-1 ring-brand-600' : tono
+                className={`absolute transition-colors ${
+                  esCreado?.(b.leaf.name) ? 'border-2 border-dashed' : 'border'
+                } ${isSel ? 'border-brand-600 bg-brand-500/30 ring-1 ring-brand-600' : tono} ${
+                  dibujando ? 'pointer-events-none' : ''
                 }`}
                 style={{ left: b.left, top: b.top, width: b.width, height: b.height }}
               >
