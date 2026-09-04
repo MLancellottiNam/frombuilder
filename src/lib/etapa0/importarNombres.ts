@@ -1,34 +1,27 @@
 // ---------------------------------------------------------------------------
-// Etapa 0 — Importar los nombres resueltos afuera (v2.0.0).
+// Etapa 0 — Importar los nombres resueltos afuera (v3.0.0).
 //
-// Cierra el circuito: la app exporta el paquete, el mapeo se resuelve afuera
-// con juicio, y acá vuelve. Dos vehículos:
+// Cierra el circuito: la app exporta el paquete, la skill resuelve el mapeo con
+// juicio, y el paquete vuelve con `nombre_nuevo` lleno (y con sus columnas de
+// afuera completas). Acá se aplican los nombres.
 //
-//  1. EL PAQUETE con la columna `nombre_nuevo` llena. Es el camino directo y sin
-//     ambigüedad: una fila por widget, con el `nombre_actual` al lado, así que
-//     el emparejamiento es exacto.
-//
-//  2. LA FICHA con la col N llena. La col N («Nombre interno del campo en PDF»)
-//     dice, por fila, con qué campo del PDF se corresponde; el nombre que se
-//     aplica es el CANÓNICO de esa fila (`slug(col C)` + `slug(col F)` cuando es
-//     una opción de grupo), que es la misma regla determinista de siempre. Si
-//     una fila lista varios campos separados por coma es el caso 1:N y los
-//     sufijos salen del formato de la col F (`dd/mm/aaaa` -> `_dia/_mes/_ano`) o,
-//     si no se puede derivar, posicionales.
+// En v2.0.0 había una segunda vía: leer la col N de la ficha y derivar el nombre
+// canónico de cada fila. Se fue con el recorte, por dos razones. Una: necesitaba
+// el generador de nombres del motor de alineación, que se borró. Otra, más de
+// fondo: la col N de la ficha **no puede expresar el renombrado** de un
+// formulario con bloque repetible —una fila se corresponde con 3 campos que
+// necesitan 3 nombres distintos y la ficha tiene una sola celda—. El paquete sí,
+// porque tiene una fila por widget.
 //
 // NADA SE APLICA A MEDIAS. Si el resultado tendría nombres repetidos, se reporta
 // y no se toca nada: un PDF con dos campos del mismo nombre rompe el bind de
-// Etapa 2 y es de los errores que no se ven hasta el final.
+// Signframe y es de los errores que no se ven hasta el final.
 //
-// Y NO SE PISA lo editado a mano sin confirmación explícita: el trabajo manual
-// vale más que un archivo que quizá está viejo.
+// Y NO SE PISA lo editado a mano sin confirmación explícita.
 // ---------------------------------------------------------------------------
 
 import type { PdfLeaf } from './pdfFields';
-import { generarNombres, slug } from './acroName';
-import { buildFichaRaw, norm, type RawSheet } from './fichaRaw';
-import { sufijosDeFormato } from './regiones';
-import { HEADERS_PAQUETE } from './paquete';
+import { HEADERS_APP } from './paquete';
 
 export interface Renombre {
   /** nombre ACTUAL del campo en el PDF */
@@ -61,19 +54,6 @@ const vacio = (): ResultadoImport => ({
   avisos: [],
 });
 
-/** «No aplica» en la col N es la forma del INS de decir «vacío». */
-function esVacio(v: string): boolean {
-  const n = norm(v);
-  return n === '' || n === 'no aplica' || n === 'n/a' || n === 'na';
-}
-
-export function partirTokens(v: string): string[] {
-  return v
-    .split(/[,;]/)
-    .map((s) => s.trim())
-    .filter((s) => s && !esVacio(s));
-}
-
 /**
  * Cierra el resultado: detecta colisiones contra los nombres que NO se tocan y
  * marca qué renombres pisarían una edición manual.
@@ -103,8 +83,6 @@ function cerrar(
   return r;
 }
 
-// --- 1. desde el paquete ---------------------------------------------------
-
 /**
  * Lee el paquete (aoa del xlsx). Se busca la fila de header por sus nombres de
  * columna en vez de asumir la primera fila: quien lo edita afuera puede haberle
@@ -122,7 +100,7 @@ export function importarDesdePaquete(
   });
   if (idxHeader < 0) {
     r.avisos.push(
-      `El archivo no parece un paquete de campos: no se encontró la fila de encabezados (${HEADERS_PAQUETE.slice(0, 3).join(', ')}…).`,
+      `El archivo no parece un paquete de campos: no se encontró la fila de encabezados (${(HEADERS_APP as string[]).slice(0, 3).join(', ')}…).`,
     );
     return cerrar(r, leaves, esManual);
   }
@@ -158,84 +136,6 @@ export function importarDesdePaquete(
     }
     yaVisto.set(actual, nuevo);
     r.aplicar.push({ nombreActual: actual, nombreNuevo: nuevo, fuente: `paquete fila ${i + 1}` });
-  }
-
-  return cerrar(r, leaves, esManual);
-}
-
-// --- 2. desde la ficha (col N) ---------------------------------------------
-
-export function importarColNDeFicha(
-  sheets: RawSheet[],
-  leaves: PdfLeaf[],
-  esManual?: (nombreActual: string) => string | undefined,
-): ResultadoImport {
-  const r = vacio();
-  const ficha = buildFichaRaw(sheets);
-
-  // Nombre canónico de cada fila. Sin instancias: una fila que se repite por
-  // instancia daría el MISMO nombre para varios campos, y eso sale como
-  // colisión en vez de resolverse con un contador ciego.
-  const nombres = generarNombres(
-    ficha.rows.map((x) => ({ ...x, instancia: null, indiceInstancia: null })),
-  );
-
-  const porNombre = new Map(leaves.map((l) => [l.name, l]));
-  // Fallback tolerante: el mismo nombre con otra caja o espacios de más.
-  const porNorm = new Map<string, PdfLeaf[]>();
-  for (const l of leaves) {
-    const k = norm(l.name);
-    if (!porNorm.has(k)) porNorm.set(k, []);
-    porNorm.get(k)!.push(l);
-  }
-  const buscar = (token: string): PdfLeaf | null => {
-    const exacto = porNombre.get(token);
-    if (exacto) return exacto;
-    const cands = porNorm.get(norm(token)) ?? [];
-    return cands.length === 1 ? cands[0] : null;
-  };
-
-  let filasConColN = 0;
-  ficha.rows.forEach((fila, i) => {
-    const tokens = partirTokens(fila.campoPdfInterno ?? '');
-    if (tokens.length === 0) return;
-    filasConColN++;
-    const canonico = nombres[i]?.nombre || slug(fila.nombrePdf || fila.label);
-    if (!canonico) {
-      r.avisos.push(`${fila.hoja}·${fila.fila}: la col N apunta a un campo pero la fila no tiene nombre (col C vacía).`);
-      return;
-    }
-    // 1:N: una fila pintada en varias cajas. El sufijo sale del formato de la
-    // col F y si no se puede derivar es posicional. Es estructural, editable, y
-    // no es desambiguación de colisión.
-    const sufijos = tokens.length > 1 ? sufijosDeFormato(fila.valor, tokens.length) : undefined;
-    tokens.forEach((token, k) => {
-      const leaf = buscar(token);
-      if (!leaf) {
-        r.sinCampoEnPdf.push({ valor: token, fuente: `${fila.hoja}·${fila.fila} (col N)` });
-        return;
-      }
-      const nuevo = tokens.length > 1 ? `${canonico}_${sufijos?.[k] ?? k + 1}` : canonico;
-      r.aplicar.push({ nombreActual: leaf.name, nombreNuevo: nuevo, fuente: `${fila.hoja}·${fila.fila} (col N)` });
-    });
-  });
-
-  if (filasConColN === 0) {
-    r.avisos.push(
-      'Ninguna fila de la ficha tiene la col N llena («Nombre interno del campo en PDF»): no hay nada que importar.',
-    );
-  }
-
-  // Dos filas apuntando al mismo campo: la última ganaría en silencio.
-  const cuenta = new Map<string, string[]>();
-  for (const x of r.aplicar) {
-    if (!cuenta.has(x.nombreActual)) cuenta.set(x.nombreActual, []);
-    cuenta.get(x.nombreActual)!.push(`${x.nombreNuevo} (${x.fuente})`);
-  }
-  for (const [actual, lista] of cuenta) {
-    if (lista.length > 1) {
-      r.avisos.push(`«${actual}» aparece en la col N de ${lista.length} filas distintas: ${lista.join(' · ')}.`);
-    }
   }
 
   return cerrar(r, leaves, esManual);

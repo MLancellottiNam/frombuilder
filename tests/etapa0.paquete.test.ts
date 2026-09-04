@@ -6,15 +6,22 @@
 import fs from 'fs';
 import path from 'path';
 import { readPdfFields, type PdfLeaf } from '../src/lib/etapa0/pdfFields';
-import { textItemDePdfjs, type TextItem } from '../src/lib/etapa0/regiones';
+import { textItemDePdfjs, type TextItem } from '../src/lib/etapa0/textoPdf';
 import {
   candidatasDeWidget,
   construirPaquete,
   cobertura,
+  COLUMNAS_EXTERNAS,
+  externasPorCampo,
+  HEADERS_APP,
   HEADERS_PAQUETE,
+  leerPaqueteAoa,
   paqueteAAoa,
+  presembrarDesdeFicha,
   textoDeZona,
 } from '../src/lib/etapa0/paquete';
+import { buildFichaRaw, readFichaSheets } from '../src/lib/etapa0/fichaRaw';
+import { derivarValidacion } from '../src/lib/etapa0/validaciones';
 
 let fail = 0;
 const ok = (c: boolean, m: string) => {
@@ -134,10 +141,59 @@ const t = (str: string, x: number, y: number, w = 40, page = 0): TextItem => ({
     ok(aoa[0].length === HEADERS_PAQUETE.length && aoa[0][0] === '#', 'la primera fila del aoa son los headers');
     ok(aoa.length === 2 && aoa[1].length === HEADERS_PAQUETE.length, 'una fila de datos, del mismo ancho');
     ok(
-      HEADERS_PAQUETE.join(',') ===
+      (HEADERS_APP as string[]).join(',') ===
         '#,nombre_actual,nombre_nuevo,tipo,pagina,x,y,w,h,etiqueta_impresa,etiquetas_candidatas,texto_zona,multi_widget,origen,notas',
-      'las columnas son las acordadas, en orden',
+      'las columnas de la app son las acordadas, en orden',
     );
+    ok(
+      COLUMNAS_EXTERNAS.join(',') === 'seccion,subseccion,label,ruta_json,required,validaciones,grupo,valor,instancia',
+      'y después van las que se completan afuera',
+    );
+  }
+
+  // --- ida y vuelta: las columnas de afuera NO se pierden -----------------
+  {
+    const uno = leaf({ name: 'campo_uno', readingIndex: 1 });
+    const dos = leaf({ name: 'campo_dos', readingIndex: 2, rect: { x: 100, y: 400, w: 80, h: 14 } });
+    const filas = construirPaquete({ leaves: [uno, dos], nombreFinal: (i) => [uno, dos][i].name, texto: [] });
+
+    // así vuelve de la skill: con nombre_nuevo y con las columnas completadas
+    const aoa = paqueteAAoa(filas).map((f) => [...f]);
+    const h = (aoa[0] as string[]).map(String);
+    const set = (fila: number, col: string, v: string) => (aoa[fila][h.indexOf(col)] = v);
+    set(1, 'nombre_nuevo', 'asg_uno');
+    set(1, 'seccion', 'Datos del cliente');
+    set(1, 'ruta_json', 'datos.personas[0].uno');
+    set(1, 'required', 'Both');
+    set(1, 'validaciones', 'máximo 8 dígitos');
+    // y con una columna que la app no conoce
+    aoa[0].push('comentario_skill');
+    aoa[1].push('revisar con el cliente');
+
+    const leido = leerPaqueteAoa(aoa);
+    ok(leido.filas.length === 2, 'lee las dos filas');
+    ok(leido.filas[0].nombre_nuevo === 'asg_uno', 'y el nombre nuevo');
+    ok(leido.filas[0].externas?.ruta_json === 'datos.personas[0].uno', 'con las columnas de afuera');
+    ok(leido.filas[0].externas?.comentario_skill === 'revisar con el cliente', 'incluida una columna que la app no conoce');
+    ok(leido.columnasExternas.includes('comentario_skill'), 'que se reporta como externa');
+
+    // al reexportar TIENEN que seguir estando
+    const vuelta = paqueteAAoa(leido.filas);
+    const h2 = (vuelta[0] as string[]).map(String);
+    ok(h2.includes('comentario_skill'), 'al reexportar, la columna desconocida sigue en el header');
+    ok(
+      String(vuelta[1][h2.indexOf('ruta_json')]) === 'datos.personas[0].uno' &&
+        String(vuelta[1][h2.indexOf('comentario_skill')]) === 'revisar con el cliente',
+      'y los valores de afuera siguen ahí: el archivo puede dar vueltas sin perder información',
+    );
+
+    const porCampo = externasPorCampo(leido.filas);
+    ok(porCampo.get('campo_uno')?.seccion === 'Datos del cliente', 'las externas se indexan por nombre_actual');
+    ok(!porCampo.has('campo_dos'), 'y una fila sin externas no ocupa lugar');
+
+    // un archivo que no es el paquete
+    const malo = leerPaqueteAoa([['cualquier', 'cosa']]);
+    ok(malo.filas.length === 0 && malo.avisos.length === 1, 'un archivo que no es el paquete se rechaza');
   }
 
   // --- CSC real: cobertura de texto ---------------------------------------
@@ -171,6 +227,70 @@ const t = (str: string, x: number, y: number, w = 40, page = 0): TextItem => ({
     const sinNada = filas.filter((f) => !f.etiqueta_impresa && !f.etiquetas_candidatas && !f.texto_zona);
     console.log(`    widgets sin ningún texto alrededor: ${sinNada.length}`);
     ok(sinNada.length < c.total * 0.15, `menos del 15% queda sin texto alguno (got ${sinNada.length})`);
+  }
+
+  // --- presembrado desde la ficha (fixture SINTÉTICO, commiteado) ---------
+  {
+    const F = path.resolve('tests/fixtures/ficha-sintetica-col-n.xlsx');
+    if (!fs.existsSync(F)) {
+      console.log('\n(SKIP) falta tests/fixtures/ficha-sintetica-col-n.xlsx (npm run fixture:ficha)');
+    } else {
+      const ficha = buildFichaRaw(await readFichaSheets(fs.readFileSync(F)));
+      console.log(
+        `\n--- ficha sintética: ${new Set(ficha.rows.map((r) => r.hoja)).size} hojas · ${ficha.rows.length} filas · ` +
+          `${ficha.rows.filter((r) => r.campoPdfInterno.trim()).length} con col N ---`,
+      );
+      ok(ficha.rows.length > 20, 'el fixture tiene filas de sobra para probar');
+      ok(ficha.stats.excluidas >= 2, `y trae exclusiones reales (${ficha.stats.excluidas})`);
+      ok(ficha.stats.filasNota >= 1, 'y una fila-nota');
+
+      // los campos del PDF, con los nombres que la col N menciona
+      const nombres = [
+        ...new Set(
+          ficha.rows.flatMap((r) =>
+            r.campoPdfInterno
+              .split(',')
+              .map((x) => x.trim())
+              .filter(Boolean),
+          ),
+        ),
+      ];
+      const leaves = nombres.map((n, i) => leaf({ name: n, readingIndex: i + 1, rect: { x: 10, y: 700 - i * 20, w: 80, h: 12 } }));
+      const filas = construirPaquete({ leaves, nombreFinal: (i) => leaves[i].name, texto: [] });
+
+      const filasFicha = ficha.rows.map((x) => ({
+        hoja: x.hoja,
+        fila: x.fila,
+        campoPdfInterno: x.campoPdfInterno,
+        campoJson: x.campoJson,
+        obligatorio: x.obligatorio,
+        observaciones: x.observaciones,
+        regla: x.regla,
+        label: x.label,
+        valor: x.valor,
+      }));
+      const r = presembrarDesdeFicha(filas, filasFicha, derivarValidacion);
+      console.log(`    presembrado: ${r.tocadas} filas · ${r.avisos.length} avisos`);
+      ok(r.tocadas > 10, `presiembra la mayoría de las filas (got ${r.tocadas})`);
+      const conRuta = filas.filter((f) => f.externas?.ruta_json).length;
+      ok(conRuta === r.tocadas || conRuta > 10, `${conRuta} filas quedan con ruta_json sugerida`);
+      ok(
+        filas.every((f) => !f.externas?.ruta_json || /presembrado desde la ficha/.test(f.notas)),
+        'y cada una dice en «notas» que es una sugerencia de la ficha',
+      );
+      const conVal = filas.filter((f) => f.externas?.validaciones).length;
+      ok(conVal > 3, `${conVal} filas con validaciones derivadas de las cols K y G`);
+
+      // NO pisa lo que vino de afuera
+      const yaResuelta = filas.find((f) => f.externas?.ruta_json)!;
+      const decidido = { ...yaResuelta, externas: { ...yaResuelta.externas, ruta_json: 'lo.que.decidio.la.skill' } };
+      const r2 = presembrarDesdeFicha([decidido], filasFicha, derivarValidacion);
+      ok(
+        decidido.externas.ruta_json === 'lo.que.decidio.la.skill',
+        `no pisa una ruta que ya venía de afuera (got ${decidido.externas.ruta_json})`,
+      );
+      void r2;
+    }
   }
 
   console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAIL`);

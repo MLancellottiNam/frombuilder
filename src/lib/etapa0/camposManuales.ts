@@ -31,8 +31,6 @@ export interface CampoCreado {
   /** 0-based */
   page: number;
   rect: Rect;
-  /** `hoja|fila|codigoInstancia`; null si quedó sin fila */
-  filaClave: string | null;
   /** uid del grupo cuando salió de trocear un rect en N cajas */
   grupo?: string;
   /** posición dentro del grupo troceado (1-based) */

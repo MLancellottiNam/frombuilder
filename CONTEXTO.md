@@ -1,423 +1,292 @@
-# CONTEXTO — Signframe Form-Definition Builder (estado actual)
+# CONTEXTO — `frombuilder`
 
-> Pegá este documento como primer prompt para retomar el trabajo con todo el contexto.
-> Describe **qué está implementado hoy**, cómo funciona y qué falta.
+Documento de traspaso. Lo que la app hace hoy, por qué, y con qué evidencia.
 
 ---
 
 ## 1. Qué es
 
-App web **local, sin backend** para armar visualmente el **JSON de definición de
-formularios de Signframe** (plataforma que mapea PDFs con AcroForms del INS Costa Rica
-a formularios estructurados).
+Una app local, sin backend, para preparar los **PDF AcroForm del INS Costa Rica** antes de
+subirlos a Signframe. Lee el PDF, muestra sus campos con la geometría y el texto impreso
+alrededor, deja editarlos, escribe el PDF renombrado y **exporta un paquete de campos
+(xlsx)** que es el artefacto con el que se resuelve el mapeo afuera.
 
-- Repo: `MLancellottiNam/frombuilder`
-- Rama de trabajo: `claude/signframe-form-builder-0bmsbi` (todo mergeado a `main`)
-- Live: **https://mlancellottinam.github.io/frombuilder/**
-  (GitHub Pages con **Source = GitHub Actions**; si vuelve a “Deploy from a branch”
-  sirve el `index.html` fuente y rompe con `main.tsx 404`)
-- Stack: **React + Vite + TypeScript + Tailwind**, `@dnd-kit` (drag & drop),
-  `papaparse` (CSV), `xlsx`/SheetJS (lazy, solo al importar), `zustand` (estado),
-  `lucide-react`, `nanoid`. Todo corre en el navegador: **sin backend ni red**.
-- Comandos: `npm install`, `npm run dev` (5173), `npm run build` (tsc + vite).
-
-**Importante: la app es 100% genérica.** No hay nada hardcodeado a un formulario
-puntual (verificado: 0 ocurrencias de vital/360/colectivo/gastos/crediticia/d0764 en
-`src/`). Sirve para cualquier ficha del INS.
+React 18 + Vite 5 + TypeScript + Tailwind 3. `pdf-lib` (dict crudo), `pdfjs-dist` (render y
+texto), `xlsx`, `zustand`, `nanoid`, `lucide-react`. Todo en el navegador: ningún archivo
+sale de la máquina.
 
 ---
 
-## 2. El flujo por etapas (así lo pensamos con el usuario)
+## 2. El circuito (v3.0.0)
 
-1. **Etapa 1 — Ordenar la matriz.** La ficha/matriz (xlsx o CSV) arma el **esqueleto**:
-   secciones → subsecciones → campos ya ubicados y ordenados, con labels, tipos,
-   paths, radios desdoblados y condiciones.
-2. **Etapa 2 — Sumar el PDF.** Se carga el **JSON main de Signframe** (el auto-mapeado
-   al importar el PDF) y se **vinculan** los campos con su `sourceName`/`sourceMeta`
-   **real**, respetando la Regla de Oro.
-3. **Etapa 3 — JSON final.** Export del form-definition. La **última milla**
-   (`autoFillConcat`, repeaters, `excludeFromJson` masivo) va con la **skill**
-   `signframe-form-def`, no con la app (decisión: enfoque **híbrido**).
+```
+la app (frombuilder)     lo mecánico
+                         leer el PDF · leer la ficha · editar campos ·
+                         renombrar · exportar el paquete
+
+afuera (una skill)       lo que necesita juicio
+                         mapear ficha ↔ PDF · generar el form-def ·
+                         la última milla
+
+Signframe                subir el PDF renombrado -> bajar el JSON main
+```
+
+El paquete de campos va, se completa afuera, y vuelve: la app aplica los nombres y escribe
+el PDF. **El PDF es el único input obligatorio**; la ficha del INS es opcional y sirve para
+presembrar columnas del paquete.
+
+**Por qué se recortó así.** De v1.0.0 a v1.4.5 la app intentó resolver el mapeo ficha↔PDF
+con heurísticas: regiones geométricas, Needleman-Wunsch, anclas por etiqueta impresa,
+elegibilidad, umbrales. Cada versión agregaba una regla de desempate y ganaba unos puntos,
+y el techo quedó en ~70%. **No era un problema de calibración: la ficha y el PDF no
+comparten ninguna clave.** La col N («Nombre interno del campo en PDF») era LA clave y el
+INS la manda vacía —en el CSC las 14 celdas «llenas» dicen literalmente «No aplica»—.
+
+Y hay decisiones que no salen de ningún score, solo de entender el formulario: un campo que
+cubre «País y lugar de nacimiento» **y** «Nacionalidad»; la ficha que dice «Física» donde el
+PDF imprime «Cédula»; un grupo de 8 opciones que el PDF parte 5/4; dos campos rotulados
+«Detalle:» por región contra UNA fila de ficha.
+
+Lo mecánico es determinístico y se puede congelar. Lo otro no. El motor de alineación, el
+armador manual (pool + canvas + drag&drop) y las etapas 1 y 2 **se borraron en v3.0.0**;
+están en el historial de git si algún día hacen falta.
 
 ---
 
 ## 3. REGLA DE ORO (no negociable)
 
-Los campos que pintan el PDF llevan `sourceMeta`. Sobre esos:
-- `id` y `sourceMeta` son **inmutables**; la UI los muestra con candado.
-- Debe cumplirse `id == "field_" + sourceName`, **respetando el renombrado**:
-  Signframe usa **minúsculas** y **`[n]` → `_n`**.
-  Ej. real del json main: `sourceName: "depGeneroFem[0]"` → `id: "field_depgenerofem_0"`.
-- Campos nuevos de UI (opciones desdobladas, helpers): id nuevo y `sourceMeta: null`.
-- Checkboxes que pintan: `checkedPdfValue: true` (nunca `"X"`).
+El `sourceMeta` que devuelve Signframe es **ground truth**: se copia verbatim y no se toca.
+Y el `id` de un campo del form-def es `"field_" + sourceName` en minúsculas, con `[n]` →
+`_n`. Nunca camelCase. Eso lo aplica la skill, pero la app lo respeta en todo lo que
+escribe: el nombre que se le pone a un campo del PDF es el que va a terminar en ese `id`,
+así que **acento, espacio o punto en un nombre es un error que se arrastra hasta el final**.
 
 ---
 
-## 4. Arquitectura del código
+## 4. Arquitectura
 
 ```
-src/types.ts            Tipos del dominio Signframe (estructura EXACTA del export)
-src/store/store.ts      Estado central (zustand) + todas las mutaciones
-src/lib/
-  idConvention.ts       detectar/aplicar convención de id (exact|lower, [n]→_n)
-  csv.ts                parseo CSV simple (pool) + mapeo de columnas
-  matrix.ts             ficha/matriz: parseTable, detección de columnas INS,
-                        readMatrix (entries), materializeMatrix (Etapa 1)
-  matrixOut.ts          export de la matriz plana a CSV/xlsx (round-trip)
-  factory.ts            creación de Field/Section/Subsection + splitPath
-  conditions.ts         serializar/parsear conditionalVisibility
-  matching.ts           Etapa 2: sugerencias, rename de id con reescritura de refs,
-                        extractAcroFromForm (leer el json main)
-  exporter.ts           buildExport (orden, childrenOrder, paths sync, _sourcePdf)
-  validation.ts         7 validaciones en vivo
-src/components/         TopBar, Pool, Canvas, Inspector, MatrixImportDialog,
-                        MatrixExplorer, AcroFormsImportDialog, UnirDialog,
-                        ValidationPanel, ConditionEditor, OptionsEditor, ui
+src/
+  lib/etapa0/
+    pdfFields.ts        lectura CRUDA del AcroForm
+    textoPdf.ts         texto impreso: etiquetas y zona (pdfjs)
+    fichaRaw.ts         lectura multi-hoja de la ficha del INS
+    validaciones.ts     las reglas de formato de las cols K y G
+    camposManuales.ts   crear, borrar y trocear campos
+    rects.ts            mover y redimensionar la caja de un campo
+    paquete.ts          el paquete de campos: ida y vuelta
+    importarNombres.ts  aplicar los nombres que resolvió la skill
+    writePdf.ts         escritura del PDF renombrado
+    writePdfImpreso.ts  copia visual con los nombres dibujados
+    slug.ts             nombre de archivo
+  components/etapa0/    la pantalla: tabla + preview + paneles
+  store/store.ts        proyecto y decisiones de Etapa 0
+  types.ts              `Project` y `Etapa0State`
+tools/
+  gen-ficha-sintetica.ts  fabrica el fixture de ficha (sin datos del cliente)
+tests/                  8 suites, 235 asserts
+tests/fixtures/         fixture SINTÉTICO, commiteado
+fixtures/               material del cliente, gitignoreado
 ```
 
-Layout: **3 columnas** — Pool (izq) · Mapa del formulario (centro) · Inspector (der),
-con barra superior de acciones.
+Una sola pantalla, dos paneles: **izquierda** la tabla de campos (`#` · nombre actual · → ·
+nombre nuevo · tipo · origen · dividir/borrar, con buscador, filtros y bulk edit);
+**derecha** el preview del PDF con el overlay, el modo dibujo y los tiradores para mover y
+redimensionar. Click bidireccional tabla↔overlay.
 
 ---
 
 ## 5. Lo implementado, en detalle
 
-### 5.1 Import de ficha/matriz (xlsx o CSV) — “Matriz”
+### 5.1 Detección (`pdfFields.ts`)
 
-Reconoce el formato real de la **“Ficha de Configuración” del INS**:
+Walk **crudo** del `/AcroForm` (no la API de alto nivel de pdf-lib, que indexa por nombre y
+se rompe con los campos jerárquicos del INS). Orden de lectura `(page, −Y, X)`. Un nodo con
+kids sin `/T` es **un** campo con N widgets, no N campos. Marca `multiWidgetSospechoso`: un
+`/Btn` multi-widget es normal (grupo de radios), un `/Tx` no —suele ser una colisión real
+del PDF, dos campos distintos que comparten nombre— y si no se parte antes de subir,
+Signframe los colapsa en un solo `sourceMeta` y el dato se pierde.
 
-- **Detecta la hoja principal** (la de más filas) en workbooks multi-hoja.
-- **Mapea columnas por nombre**, con *candidate-priority* (prueba candidatos
-  específicos antes que genéricos) y tolerante a acentos:
-  | Col | Header | Uso |
-  |---|---|---|
-  | A | `Pasos Formulario` | `section.title` |
-  | B | `Sección` | `subsection.title` |
-  | D | `Nombre del campo en formulario` | label / agrupador de opciones |
-  | E | `Tipo de dato` | `field.type` |
-  | F | `Valor` | valor de la opción → `jsonValue` |
-  | G | `Regla` | condiciones |
-  | H | `Obligatorio` | `required` |
-  | J | `Visualización en Formularios` | `readOnly` / `hidden` |
-  | M | `Nombre del campo en el JSON` | `salidaJSON` (+ secundaria) |
-  | N | `Nombre del campo en el PDF` | `sourceName` |
-- **Forward-fill** de sección/subsección (celdas combinadas).
-- **Agrupación de opciones**: filas **consecutivas con el mismo label (col D)** = una
-  pregunta con varias opciones → se modela **desdoblada**: un `radio` por opción,
-  compartiendo `radioGroupLabel`, con `radioGroupFields` cruzados y `jsonValue` = col F.
-- **Reglas col G**: patrón dominante `"se despliegan los campos: A / B"` = regla
-  **invertida** (esta fila es el disparador, lista los targets). Los targets reciben
-  `conditionalVisibility` `not_empty` apuntando a **esa opción concreta**, combinadas
-  con `or` si varias opciones revelan el mismo campo. El matching de targets es
-  **insensible a acentos y puntuación** (`Quienes` matchea `¿Quiénes?`).
-- **Dos destinos en col M**: si la celda trae `"codigoX, descripcionX"` se parte en
-  `salidaJSON` (primario) + `salidaJSONSecundaria`, como el golden. Nunca se emite un
-  path con coma.
-- **Dos modos** al importar:
-  - **Etapa 1 · Armar ordenado** (default): construye el árbol con los campos ya
-    ubicados; muestra preview (“N secciones · M preguntas de opciones · K condiciones”).
-  - **Solo al pool**: carga los campos al pool + crea las secciones/subsecciones
-    vacías, para arrastrar a mano.
+### 5.2 Texto impreso (`textoPdf.ts`)
 
-### 5.2 Explorador de matriz (entenderla antes de armar)
+Es lo que sobrevive del módulo grande de regiones: leer el texto con pdfjs, encontrar el
+rótulo pegado a un widget (izquierda para `/Tx`, derecha para `/Btn` —mirar los dos lados
+genera cruces—) y derivar los sufijos de un campo troceado por su formato de fecha
+(`dd/mm/aaaa` → `_dia/_mes/_ano`). Un texto de solo guiones no es una etiqueta: es el
+placeholder de la línea a completar.
 
-Botón **“Explorar en detalle”** dentro del import. Vista read-only:
-- **Árbol compartimentado**: Sección → Subsección → **Pregunta** con sus **opciones
-  anidadas** (no filas sueltas). Ej.: “Seleccione la moneda de la póliza” con badge
-  “2 opciones” y `↳ Colones` / `↳ Dólares`.
-- **Duplicados**: marca `×N` (por `sourceName` real; labels repetidos = opciones, no dup).
-- **Chips de lógica** por fila: `↳ muestra: A · B` (lo que despliega) y `👁 si …`.
-- **Simulador Sí/No**: elegís respuestas y ves qué campos se muestran/ocultan
-  (“se ven X de Y campos”).
-- Filas con `data-entry` / `data-visible` (hooks estables de test).
+### 5.3 Ficha (`fichaRaw.ts`)
 
-### 5.3 Pool y Canvas (armado manual)
+Lector multi-hoja: aplana las 13 hojas, detecta el header de 14 columnas y las **4
+exclusiones**, con `motivo` por fila y reconciliación auditable. Un marcador `NO APLICA`
+real cumple **3 condiciones** (`NO APLICA` + (`HOJA`|`SECCION`) + `FORMULARIO`); nunca se
+escanean las cols J ni N, que usan «No aplica» como enum. Las **filas-nota** (col C con
+prosa en vez de un nombre de campo) se detectan por señal **estructural** —sin label, sin
+tipo, sin ruta— y no por largo del texto: en el CSC las preguntas PEP tienen 16-23 palabras
+y son campos reales, mientras «Dentro de datosFormulario» tiene 3 y es nota.
 
-- **Pool**: campos sin ubicar, con buscador, **selección múltiple → “Agrupar”** en una
-  subsección nueva, y etiqueta `→ Sección / Subsección` **sugerida** por la matriz.
-- **Canvas**: crear secciones/subsecciones, **drag & drop** (pool→subsección y entre
-  subsecciones, reordenar), colapsar, ocultar, reordenar secciones.
-- **Los radios desdoblados se muestran agrupados**: bloque colapsable con el título de
-  la pregunta, badge “N opciones” y cobertura `x/N PDF`, con las opciones anidadas.
-- Cada campo condicionado muestra un chip **“👁 si «disparador»”** (resuelve el id del
-  trigger a su label). Los NEVER muestran “oculto”.
+Desde v3.0.0 su salida alimenta las **columnas del paquete**, no un árbol de formulario.
 
-### 5.4 Inspector
+### 5.4 Edición de campos
 
-Edita tipo, label, ancho, `required`, `readOnly`, `hidden`, `excludeFromJson`,
-`salidaJSON`, **`salidaJSONSecundaria`**, `checkedPdfValue`, formatos
-(`jsonNumberFormat`, `jsonDateFormat`), `defaultValue`, **opciones**, y editores
-visuales de **`conditionalVisibility` / `conditionalRequired`** (dropdown de campo +
-operador + valor, con opción “siempre oculto” = NEVER).
-En campos con `sourceMeta`, **`id` y `sourceMeta` son solo lectura (candado)**.
+- **Crear**: se dibuja el rect sobre el preview y se elige tipo (`/Tx` `/Btn` `/Sig`). En el
+  CSC las cuatro firmas son líneas **dibujadas**: 115 widgets y cero `/Sig`.
+- **Borrar**: detectados incluidos, con confirmación y reversible.
+- **Trocear en N** y **reemplazar por N cajas**: el caso de la fecha del CSC, que el
+  asegurado resuelve con UNA caja de 88pt y el representante con TRES.
+- **Mover y redimensionar** (`rects.ts`), arrastrando o escribiendo x/y/w/h.
+- **Nombre y tipo** por campo, **bulk edit** (prefijo, sufijo, buscar-reemplazar) y
+  colisiones en vivo.
 
-### 5.5 Etapa 2 — PDF y binding (“Campos PDF”, “PDF”, “Unir”)
+Dos claves a propósito en `rects.ts`: en la UI el override se indexa por
+`claveEstable#índiceDeWidget` sobre la lista ORIGINAL; para **escribir** se traduce a
+`{rect original → rect nuevo}` y se empareja **por el rect**, porque `readPdfFields` ordena
+los widgets por orden de lectura y `writePdf` los recorre en el orden de `/Kids` —con un
+índice se movería el widget equivocado, en silencio y en el entregable—.
 
-- **“Campos PDF”** importa **el JSON main de Signframe** (el auto-mapeado del PDF) o,
-  como fallback, un xlsx/CSV de nombres de AcroForms.
-  - Del JSON main extrae, por cada campo con `sourceMeta`: `sourceName`, **`id`
-    autoritativo**, `type`, `page` y el **`sourceMeta` completo**.
-  - **Preserva `_sourcePdf`** (`fileName`, `pageCount`, `fieldPositions`) en el proyecto
-    → se emite en el export (es el ground truth del validador).
-- **“PDF”** adjunta el PDF y lo muestra embebido como referencia.
-- **“Unir”** (workspace, modal ancho): PDF a la izquierda, tabla de vinculación a la
-  derecha. Por cada campo sin vincular: **sugerencias automáticas** por similitud
-  (label / cola del path, con % de match) + input con datalist. Al vincular:
-  - copia el **`sourceMeta` VERBATIM** del json main (con `rect`, `fontSize`…),
-  - adopta el **`id` real**,
-  - **reescribe todas las referencias** al id viejo (`conditionalVisibility`,
-    `conditionalRequired`, `radioGroupFields`, `autoFillConcat.sourceFieldIds`),
-  - `checkedPdfValue: true` si es checkbox,
-  - rechaza el bind si generaría un id duplicado.
-  Contadores de cobertura (vinculados / sin vincular / AcroForms sin usar) y desvincular.
+La identidad de un campo creado es un **`uid` propio que no depende de su nombre**: si fuera
+el nombre, borrar «X» y crear otro «X» reengancharía la edición al campo equivocado.
 
-### 5.6 Validaciones en vivo (badge en la barra)
+### 5.5 Escritura (`writePdf.ts`)
 
-1. Todos los `sourceName` usados existen en el CSV cargado.
-2. `id == "field_"+sourceName` en todo campo con `sourceMeta`.
-3. Sin `id` duplicados en el árbol.
-4. Cobertura: ubicados vs. pendientes en el pool.
-5. `order > 0` en todos.
-6. Checkboxes del PDF con `checkedPdfValue: true`.
-7. `conditionalVisibility`/`conditionalRequired` parsean y referencian ids existentes.
+Sobre el dict crudo: aplana `/AcroForm/Fields` (Signframe necesita nombres planos), **baja
+los heredables** (`FT`, `Ff`, `DA`, `Q`, `MaxLen`, `Opt`) antes de desenganchar el
+`/Parent`, limpia `/V` `/DV` `/TU` `/TM` `/RV`, pone `/AS /Off` en los `/Btn`, topea el
+tamaño de fuente del `/DA`, setea `/NeedAppearances`, agrega los creados con `/F 4` (y
+`SigFlags 3` si hay alguna firma), saca los borrados del `/Annots` de su página y aplica los
+rects editados. Al final **relee el PDF escrito** y exige `detectados − borrados + creados`
+nombres únicos.
 
-Cada ítem que falla es **clickeable** y selecciona el campo.
+Los renombrados circulares (A→B y B→A) **no necesitan nombre intermedio**: el renombre se
+aplica sobre la identidad del objeto, no sobre una tabla por nombre.
 
-### 5.7 Exportar (menú **Exportar ▾**)
+### 5.6 Las tres descargas
 
-- **JSON** — form-definition Signframe: reasigna `order` 1..n, reconstruye
-  `childrenOrder`, sincroniza `salidaJSON`/`jsonOutputPath`, **preserva `_sourcePdf`**.
-  Avisa (no bloquea) si hay validaciones en rojo.
-- **CSV** y **xlsx** — la **matriz plana enriquecida**: una fila por campo/opción con
-  las **mismas columnas que la app sabe importar** → **round-trip** (editás en Excel y
-  reimportás). Verificado que al reimportar se re-agrupan las preguntas desdobladas y
-  se conserva el binding de `sourceName`.
-- **Proyecto** (.json) para guardar/cargar todo el estado, e **Importar JSON** de un
-  form-definition existente (preserva `_sourcePdf`, ids y `sourceMeta`).
+1. **PDF renombrado** — el que se sube a Signframe.
+2. **PDF con nombres impresos** — copia visual con el nombre de cada campo dibujado encima
+   en 5pt, con el `#` del paquete adelante. Para revisar en papel o mandárselo al cliente.
+   **No se sube**, y el botón lo dice. Se genera encadenado al renombrado (se escribe, se
+   relee y se rotula), así lo impreso es exactamente lo que va a estar en los campos. Acá sí
+   se usa la API de dibujo de pdf-lib —la regla es no usarla para CAMPOS— y se guarda con
+   `updateFieldAppearances: false` para no deshacer el `/NeedAppearances`.
+3. **Paquete de campos (xlsx)** — §5.7.
 
-### 5.8 Etapa 0 — Detector y editor de campos del PDF (v2.0.0)
+### 5.7 El paquete de campos = la matriz
 
-**El cambio de foco (v2.0.0).** De v1.0.0 a v1.4.5 Etapa 0 intentó resolver el mapeo
-ficha↔PDF con heurísticas: regiones geométricas, Needleman-Wunsch, anclas por etiqueta
-impresa, elegibilidad por región, umbrales de tokens. Cada versión agregaba una regla de
-desempate más fina y ganaba unos puntos. **El techo no era de calibración, era de
-naturaleza del problema: la ficha y el PDF no comparten ninguna clave.** La col N
-(«Nombre interno del campo en PDF») era LA clave y el INS la manda vacía —en el CSC las
-14 celdas «llenas» dicen literalmente «No aplica»—. Todo lo demás es reconstrucción.
+El artefacto central. Una fila por **widget**, en orden de lectura. Un campo con dos widgets
+aparece en dos filas con el mismo `#` y el mismo `nombre_actual`: eso es justamente lo que
+hay que ver, un nombre pintando en dos lugares.
 
-Y hay decisiones que no salen de ningún score, solo de entender el formulario:
-`asg_nacionalidad` cubre «País y lugar de nacimiento» **y** «Nacionalidad»; la ficha dice
-«Física» donde el PDF imprime «Cédula»; un grupo de 8 opciones que el PDF parte 5/4; dos
-campos rotulados «Detalle:» por región contra UNA fila de ficha.
-
-**Así que la app dejó de adivinar.** Se queda con lo que una máquina hace mejor que una
-persona —leer el AcroForm, medir geometría, extraer el texto impreso, escribir el PDF— y
-el mapeo se resuelve afuera, con juicio, sobre un paquete que la app exporta:
+Columnas que **escribe la app**:
 
 ```
-1. la app     detecta campos · geometría · etiquetas impresas
-              agregar / borrar / renombrar / mover / trocear a mano
-              -> EXPORTA el paquete de campos (xlsx) + el PDF
-2. afuera     se resuelve el mapeo leyendo formulario + ficha + paquete
-              -> devuelve los nombres
-3. la app     IMPORTA esos nombres -> escribe el PDF renombrado
-4. Signframe  subir el renombrado -> bajar el JSON main
-5. Etapa 1/2  esqueleto desde la ficha + bind 1:1 por sourceName
+# · nombre_actual · nombre_nuevo · tipo · pagina · x · y · w · h
+etiqueta_impresa · etiquetas_candidatas · texto_zona · multi_widget · origen · notas
 ```
 
-**El PDF es el único input obligatorio.** La ficha pasó a ser opcional y entra solo para
-importar nombres.
+Columnas que se **completan afuera** y la app no toca:
 
-Módulos vivos (`src/lib/etapa0/`):
+```
+seccion · subseccion · label · ruta_json · required · validaciones · grupo · valor · instancia
+```
 
-| archivo | qué hace |
-|---|---|
-| `pdfFields.ts` | walk **crudo** del AcroForm (no la API de alto nivel de pdf-lib). Orden de lectura `(page, -Y, X)`. Un nodo con kids sin `/T` es **un** campo con N widgets. Marca `multiWidgetSospechoso` (`/Tx` con >1 widget = colisión del PDF original). |
-| `paquete.ts` | **el paquete de campos**: una fila por WIDGET en orden de lectura, con `nombre_actual`, `nombre_nuevo`, tipo, página, rect, `etiqueta_impresa`, `etiquetas_candidatas`, `texto_zona`, `multi_widget`, `origen` y `notas`. Un campo con dos widgets da dos filas con el mismo `#` y el mismo `nombre_actual`: eso es justo lo que hay que ver. Tiene que ser **autosuficiente** — quien lo lee resuelve el mapeo con eso, la ficha y el PDF impreso, sin abrir la app. |
-| `importarNombres.ts` | cierra el circuito. Dos vehículos: el **paquete** con `nombre_nuevo` (directo y sin ambigüedad) y la **ficha** con la col N (matchea contra `nombre_actual` y aplica el nombre canónico de la fila, con sufijos 1:N del formato de la col F). **Nada se aplica a medias**: si algún nombre quedaría repetido se reporta y no se toca nada. **No pisa** lo editado a mano sin confirmación explícita. |
-| `camposManuales.ts` | crear y borrar campos. `aplicarCambios` devuelve la lista **efectiva** (detectados − borrados + creados) reordenada por orden de lectura. `trocearRect` reparte un rect en N cajas parejas. La identidad de un creado es un **`uid` propio que no depende de su nombre**: si fuera el nombre, borrar «X» y crear otro «X» reengancharía la edición al campo equivocado. |
-| `rects.ts` | **editar la geometría** (v2.0.0): mover y redimensionar, en detectados y creados. Dos claves a propósito: en la UI el override se indexa por `claveEstable#índiceDeWidget` sobre la lista ORIGINAL; para **escribir** se traduce a `{rect original -> rect nuevo}` y se empareja **por el rect**, porque `readPdfFields` ordena los widgets por orden de lectura y `writePdf` los recorre en el orden de `/Kids` —un índice movería el widget equivocado en silencio—. `aplicarRects` no reordena la lista de widgets (reordenarla haría que el próximo arrastre escribiera en la clave de otro) y arrastrar un borde no invierte la caja: topea en 4pt. |
-| `writePdf.ts` | escribe el PDF renombrado sobre el dict crudo: aplana `/AcroForm/Fields` (Signframe necesita nombres planos), baja los heredables (`FT`, `Ff`, `DA`, `Q`, `MaxLen`, `Opt`) antes de desenganchar el `/Parent`, limpia `/V` `/DV` `/TU` `/TM` `/RV`, pone `/AS /Off` en los `/Btn`, topea el `/DA`, setea `/NeedAppearances`, aplica creados, borrados y rects. Relee el resultado y exige nombres únicos. **Los renombrados circulares no necesitan nombre intermedio**: el renombre se aplica sobre la identidad del objeto, no sobre una tabla por nombre. |
-| `writePdfImpreso.ts` | el **PDF con los nombres impresos**: dibuja el borde de cada widget y su nombre en 5pt con el `#` del paquete adelante. Es una **copia visual para revisar sin la app** y NO se sube a Signframe. Acá sí se usa la API de dibujo de pdf-lib —la regla es no usarla para CAMPOS— y se guarda con `updateFieldAppearances:false` para no deshacer el `/NeedAppearances`. |
-| `fichaRaw.ts` | sigue siendo el lector multi-hoja del xlsx del INS (13 hojas, header de 14 columnas, col N). Su clasificación de destino (filas-nota, exclusiones, `NO APLICA`, precedencia JSON-first) quedó **sin uso en el flujo**: se conserva por si el mapeo vuelve a la app y porque el import de la col N lo usa para ubicar las filas. |
-| `regiones.ts` (lo que sobrevive) | `extraerTextoPdf` y `textItemDePdfjs` (texto impreso con pdfjs), `etiquetasDeLeaf` / `etiquetaPreferida` (rótulo de un widget: izquierda para `/Tx`, derecha para `/Btn`), `textoDeRegion` y `sufijosDeFormato`. Todo lo de regiones, bandas, anclas, elegibilidad, segmentos y evidencias quedó **dormido**. |
+**El archivo puede dar vueltas sin perder información**: al reimportar se lee `nombre_nuevo`
+y todo lo demás se conserva —incluidas columnas que la app no conoce—, y al reexportar se
+vuelve a escribir tal cual. Es la única memoria del mapeo.
 
-**Dormido, no borrado** (queda en el repo con todos sus tests, sin cablear desde la UI):
-`align.ts` completo (DP, segmentos, confianza, 1:N, huérfanos), `acroName.ts` completo
-(instancias, expansión, `generarNombres` —que el import de la col N sí usa para el nombre
-canónico—, colisiones, grupos de opciones), la mitad grande de `regiones.ts`, `reporte.ts`,
-`writeFicha.ts::escribirFichaConColN`, `ModoRevision.tsx` y la pantalla vieja en
-`Etapa0ScreenV1.tsx.bak` (con extensión `.bak` justamente para que no la compile tsc: sus
-props ya no existen). Si el enfoque nuevo se confirma, se limpia; los 480 asserts de
-librería siguen cubriéndolo mientras tanto, así que no se podre en silencio.
+Las columnas valiosas no son las del AcroForm sino las del texto: con `etiqueta_impresa`,
+`etiquetas_candidatas` y `texto_zona`, quien lee el paquete resuelve el mapeo con eso, la
+ficha y el PDF impreso, **sin abrir la app**.
 
-UI (`src/components/etapa0/`): dos paneles.
+**Presembrado** (opcional): si se cargó la ficha, se copian `ruta_json` (col M), `required`
+(col H) y `validaciones` (cols K y G) a las columnas de afuera. Es una **sugerencia** —queda
+anotada en `notas`— y **no pisa** nada que haya vuelto de la skill: quien resolvió el mapeo
+con el formulario a la vista sabe más que la ficha.
 
-- **Izquierda: la tabla de campos.** `#` · nombre actual · → · nombre nuevo (editable, con
-  colisiones en vivo) · tipo · origen · ✕ / dividir / borrar. Buscador, **filtros**
-  (`sin nombre` · `con colisión` · `creados` · `multi-widget`), **bulk edit** (prefijo,
-  sufijo, buscar-reemplazar sobre la selección) y `Posiciones`.
-- **`PanelCampo`** es la respuesta al click: el campo que se toca —en el PDF o en la
-  tabla— se abre con la **etiqueta que el PDF tiene impresa al lado**, el **texto de su
-  zona**, el nombre, el tipo y la **caja editable con números** (para alinear con la de al
-  lado, escribir el valor es más preciso que el mouse). Seleccionar además **lleva** hasta
-  el campo: la tabla scrollea su fila y el preview salta a su página y la centra.
-- **Derecha: el preview.** Overlay por widget con el nombre final, leyenda de colores
-  (azul = con nombre nuevo · gris = sin nombre · rojo = repetido · punteado = creado),
-  `+ Agregar campo` (dibujar el rect) y, en el campo seleccionado, **8 tiradores** para
-  mover y redimensionar. Click bidireccional tabla↔overlay.
-- **Barra superior**: contadores (`N campos (M widgets) · K con nombre · C colisiones`),
-  las **tres descargas** —`PDF renombrado` (el que se sube a Signframe), `PDF con nombres
-  impresos` (para revisar, no se sube) y `Paquete de campos (xlsx)`— y `Cargar nombres`.
-  Las tres descargas están disponibles **sin ficha**.
+Las validaciones se leen de las cols **K y G**, porque en la ficha real conviven las dos
+formas: «50 caracteres alfanumericos» en K y «Alfanumérico (50)» en G. Y lo que no se
+entiende **no se inventa**: queda sin reconocer, con el texto crudo. Un `maxLength`
+inventado corta datos del cliente en producción.
 
-Dos detalles de scroll que costaron una vuelta: el salto a un campo de otra página no puede
-hacerse en el mismo tick que el `setPage` —la caja todavía no existe—, así que va en un
-efecto atado a las cajas ya renderizadas, y solo **una vez por (campo, página)** o la página
-salta abajo del puntero mientras se arrastra; y traer una fila a la vista con
-`scrollIntoView` arrastra también los contenedores de arriba, así que la tabla mueve **solo**
-su propia caja calculando el delta a mano.
+### 5.8 Reimportar (`importarNombres.ts`)
 
-El aviso duro se queda: **el renombrado va siempre antes de subir el PDF a Signframe**; si
-entra antes, el `sourceMeta` queda clavado a los nombres genéricos del AcroForm. El estado
-de Etapa 0 (ediciones, creados, borrados, rects editados, tope de fuente, descargas hechas)
-se guarda dentro del **proyecto .json**; los archivos no viajan.
+**Nada se aplica a medias**: si el resultado tendría nombres repetidos —incluido el choque
+contra un campo que el archivo no menciona— se reporta y no se toca nada. **No se pisa** lo
+editado a mano sin confirmación explícita (hay un botón aparte para eso). Un campo con
+varios widgets es UN campo y lleva UN nombre: si el paquete trae dos distintos, se avisa.
 
-**Medido sobre el CSC real (sin cargar la ficha):** 111 campos / 115 widgets detectados;
-el paquete sale con **115 de 115 widgets con etiqueta impresa o candidatas** y 114 con
-texto de zona (la alineación anclaba 67, porque anclar exigía además matchear una fila de
-la ficha); el PDF impreso rotula **115 de 115** widgets y los nombres se extraen como
-texto; el circuito completo —crear un `/Sig`, borrar un detectado, trocear otro en 3, mover
-una caja, bajar el paquete, editarlo afuera, reimportarlo y escribir— deja **114 campos,
-114 nombres únicos, 0 duplicados**, con el creado presente y el borrado ausente.
-
----
-
-### 5.9 Etapa 1 — Generador con preview de formulario y JSON en vivo (v3.0.0)
-
-Etapa 1 dejó de ser un armador manual (pool + canvas + drag&drop). Andaba, pero era lento
-y no contestaba las dos preguntas que importan: **¿cómo se ve el formulario?** y **¿qué JSON
-escribe?** La segunda no se podía ver en ningún lado hasta probarla en Signframe.
-
-Ahora es: **cargar → generar → revisar en dos paneles**, y los dos están conectados. Al
-llenar un campo, el valor aparece en su ruta del JSON; al clickear una ruta, se resalta el
-campo que la escribe. No hay preview del PDF a propósito, y no hay edición inline sobre la
-preview: se edita en el panel lateral, que es el **Inspector que ya existía**.
-
-Tres archivos, uno obligatorio: la **ficha con la col N llena** (secciones, labels, tipos,
-opciones, validaciones y rutas), el **JSON main de Signframe** (recomendado: trae el
-`sourceMeta` real) y un **form-def de referencia** (opcional, para copiarle patrones como
-sugerencia con diff).
-
-Módulos (`src/lib/etapa1/`):
-
-| archivo | qué hace |
-|---|---|
-| `desdeFicha.ts` | el generador. **No duplica nada**: el lector es `fichaRaw.ts` (el mismo de Etapa 0, que reemplaza a `parseTable` —single-sheet, se quedaba con la hoja de más filas y tiraba las otras nueve—), la estructura la arma `materializeMatrix` y las instancias las expande `acroName.ts`. Agrega el cruce con el main (tipos y anchos), las reglas en prosa, las rutas con índice de instancia (`personas[i]`, indexando el nodo RAÍZ del bloque) y los huecos de la última milla. |
-| `anchos.ts` | el ancho sale del `rect` del main. El ancho útil se deriva del propio main (mínimo X y máximo X+W) y se usa **uno para todo el documento** (la mediana de las páginas): con un útil por página, el mismo campo de 382pt caía en dos escalones distintos según la página, porque la página 1 del CSC tiene una banda vertical que le come 29pt. Las casillas quedan afuera de la escala —su rect es el cuadradito de 10pt— y ocupan su renglón. |
-| `validaciones.ts` | parser de las reglas de formato: `«8 dígitos»` → tope + patrón numérico, `«150 caracteres alfanuméricos»` → solo tope, `«Formato dd/mm/aaaa»` → `jsonDateFormat`, `«Formato de correo»` → patrón. Lo que no se entiende **no se inventa**: queda `reconocido: false` con el texto crudo. Un `maxLength` inventado corta datos del cliente en producción. |
-| `reglas.ts` | las reglas escritas en prosa. `«Solo aplica cuando código de persona es "ASG" y "RPL"»` → a qué instancias aplica la fila; `«Si se escoge "SI" se debe mostrar el campo "X"»` → condicional con `equals`; `«Concatenar automatico»` → hueco de `autoFillConcat`. Cada parser trabaja sobre **su cláusula**: una celda trae dos frases pegadas y sin partirlas los códigos de instancia se llevaban «SI» y «Detalle el Cargo» de premio. |
-| `payload.ts` | el JSON de salida y sus diagnósticos: campo sin ruta, radios que se pisan, grafía sospechosa, colisión de ruta, índice de instancia repetido, **ruta contenedora** y los huecos. Más la cobertura del contrato (rutas declaradas vs escritas, comparadas sin índices o mediría cualquier cosa) y los valores de ejemplo para ver el payload entero sin tipear 200 campos. |
-
-**Hallazgos del fixture real que cambiaron el diseño:**
-
-1. El patrón `«se despliegan los campos: A / B»` que se daba por dominante **no aparece ni
-   una vez** en la ficha del CSC. Lo que aparece son 48 filas declarando a qué instancias
-   aplican: es el subset por instancia dicho en palabras, lo mismo que Etapa 0 deducía de la
-   geometría. Sin leerlo, el asegurado hereda los campos de la persona jurídica.
-2. Las validaciones no viven solo en la col K: la col G también trae `«Alfanumérico (50)»` y
-   `«Formato DD/MM/AAAA»`. Se leen las dos.
-3. `«JSON»` en la col A no es el nombre de un paso: es la marca de fila de contrato. Sin
-   tratarlo aparte, el formulario salía con cuatro secciones llamadas «JSON». Y el índice del
-   INS declara que `encabezado` tiene paso «No aplica»: esa sección va oculta con
-   `hidden: true` + `conditionalVisibility: null`, nunca `NEVER_EXISTS`.
-4. **Tres campos escribían en el nodo contenedor** (`datosFormulario.personas[i]`, sin hoja).
-   Escribir un valor ahí reemplaza el objeto entero: el payload salía con **25 hojas en vez
-   de 112**. No se ve en el JSON —se ve el resultado— y lo cazó el panel en vivo. Ahora no se
-   escribe ahí y se reporta como error.
-
-**Medido sobre el CSC** (ficha con col N generada por el motor de Etapa 0 + main derivado del
-PDF renombrado): 9 hojas · 6 secciones · 14 subsecciones · **163 campos**, 88 con `sourceMeta`
-verbatim, **0 sin vincular**, ids por la Regla de Oro, anchos 122 full / 26 quarter / 10 third
-/ 5 half (útil 539.5pt), cobertura 62 rutas escritas de 75 declaradas, 28 diagnósticos (12
-colisiones de ruta, 10 grafías sospechosas, 3 rutas contenedoras, 1 sin ruta, 2 huecos) y el
-**validador en 0 ERROR**.
-
-Lo que **no** hace: la última milla (`autoFillConcat`, repeaters con `slotMappings`,
-`excludeFromJson` masivo, `jsonValueSecundario`) sigue en la skill `signframe-form-def`. Acá
-se **detecta y se marca como hueco**, no se genera.
-
-Queda **sin uso** (no borrado): `Pool.tsx`, `Canvas.tsx`, el `DndContext` de `App.tsx` con
-`placeSourceField`/`moveField`/`project.pool` —y con eso las tres dependencias `@dnd-kit/*`,
-que **no se sacan del `package.json` hasta confirmarlo**—, `MatrixImportDialog`,
-`MatrixExplorer`, `CsvImportDialog`, y de `matrix.ts` el `parseTable` para la ficha (sigue
-vivo para el main) y `guessMatrixMapping`. `UnirDialog` sobrevive como excepción, solo para
-los campos que no bindearon. El workspace viejo sigue accesible desde el botón «Workspace».
+La vía «col N de la ficha» existió en v2.0.0 y se fue con el recorte. Además del motor que
+necesitaba, tenía un límite de fondo: **la col N no puede expresar el renombrado** de un
+formulario con bloque repetible —una fila se corresponde con 3 campos que necesitan 3
+nombres distintos y la ficha tiene una sola celda—. El paquete sí, porque tiene una fila por
+widget.
 
 ---
 
 ## 6. Estado verificado (evidencia)
 
-Con la ficha real `Book1_MAPEADO_v1.xlsx` (403 filas, formato INS):
-- Auto-detectó **las 10 columnas** sin configuración.
-- Produjo: **8 secciones, 19 subsecciones, 396 campos, 38 radios desdoblados,
-  13 condiciones, 330 con `sourceMeta` / 66 UI** — idéntico al output que ya tenía el
-  usuario.
-- **Validador de la skill `signframe-form-def`: 10 OK, 0 ERROR**, 1 WARN
-  (solo “no hay `_sourcePdf` embebido”, que desaparece al importar el json main).
+Sobre el **CSC** (`BUC_Formulario_Conozca_Cliente_Homologado.pdf`, 111 campos / 115 widgets,
+2 páginas):
 
-Comparación de **forma** contra un form-def golden (5919 Seguro Médico Colectivo):
-- Keys de **sección y subsección: idénticas**.
-- El campo de la app es **superset** de las keys base del golden
-  (`id, label, options, order, readOnly, required, sourceMeta, type`).
-- Las keys extra del golden (`pdfValue`, `helpText`, `placeholder`, `maxLength`,
-  config de firmas, `_revisar`…) son **opcionales/por-feature** → última milla.
+- **Detección**: 111 campos, 115 widgets, 4 `/Tx` multi-widget marcados, cero `/Sig`.
+- **Paquete**: 115 filas para 115 widgets · **113 con etiqueta impresa** · 114 con texto de
+  zona · 1 solo widget sin nada alrededor. (La alineación de v1.4.3 anclaba 67, porque
+  anclar exigía además matchear una fila de la ficha.)
+- **PDF impreso**: 115 de 115 widgets rotulados, +11KB, y los nombres se extraen como texto.
+- **Circuito completo**: crear un `/Sig`, borrar un detectado, trocear otro en 3, mover una
+  caja, bajar el paquete, completarlo afuera (nombres + `ruta_json` + `seccion` + una columna
+  inventada), reimportarlo y reexportarlo → **118 filas conservan las columnas de afuera**,
+  incluida la que la app no conoce.
+- **PDF renombrado, releído**: **114 campos, 114 nombres únicos, 0 duplicados, 0 sin
+  renombrar, 0 con acento/espacio/punto, 0 con `/V`**, el `/Sig` creado presente y el campo
+  borrado ausente.
+- **Suite**: 8 suites, **235 asserts**, 0 SKIP local. `npm run build` limpio.
 
-**Parche aplicado al validador de la skill** (`scripts/validate.py`): el check
-`id == field_+sourceName` ahora acepta las 4 variantes (exacto/lower × `[n]`/`_n`).
-Antes marcaba **117 falsos positivos en el propio json main de Signframe**; ahora ese
-archivo valida **0 ERROR / 0 WARN**.
-
----
-
-## 7. Lo que NO hace la app (va con la skill `signframe-form-def`)
-
-Medido contra el golden 5919 (802 campos):
-- **`autoFillConcat`** (305 en el golden): notificación concatenada, fecha partida en
-  substrings, fecha “hoy”, etc.
-- **Repeaters** + `slotMappings` (8) y el **lookup de enfermedades** con `needles`
-  entre comillas.
-- **`excludeFromJson`** masivo (460) y los ~**499 campos ocultos** que pintan derivados.
-- `jsonValueSecundario` con los pares código/descripción.
-
-**Decisión acordada: enfoque híbrido.** La app deja el **esqueleto correcto**
-(estructura + binding + condiciones + validación); la skill hace la última milla y la
-app puede **re-importar** el resultado para revisión visual final.
+El **fixture de ficha** (`tests/fixtures/ficha-sintetica-col-n.xlsx`) es **sintético y
+commiteado**: tiene la misma forma que la del INS —hojas de nodo, índice «Estructura base
+JSON», bloque repetible con 3 códigos, col N con varios nombres por celda, filas-nota, hoja
+y bloque `NO APLICA`— y ningún dato del cliente. Se regenera con `npm run fixture:ficha`.
+La ficha real y los PDF viven en `fixtures/`, que está **gitignoreada**: el pipeline de
+80-100 formularios no puede terminar con documentos del cliente adentro del repo.
 
 ---
 
-## 8. Convenciones de trabajo con el usuario (Marcos)
+## 7. Lo que NO hace la app
 
-- Español argentino informal, respuestas directas y accionables.
-- Versionar incremental, nunca pisar. Trabajar siempre sobre el **último archivo** que
-  pasa el usuario.
-- Ante ambigüedad: preguntar con opciones cortas, no inventar.
-- Todo cambio: `npm run build` limpio + verificación real (tests de librería con
-  esbuild y/o navegador con Playwright) antes de commitear y pushear.
+Todo lo que necesita juicio, y a propósito:
+
+- **mapear ficha ↔ PDF**: se resuelve afuera, sobre el paquete;
+- **generar el form-definition** (secciones, tipos, anchos, opciones, condicionales);
+- **la última milla**: `autoFillConcat`, repeaters con `slotMappings`, `excludeFromJson`
+  masivo, `jsonValueSecundario`, campos ocultos que pintan derivados;
+- **validar el form-def**. El validador que tenía la app era el único control del circuito
+  —Signframe guarda el JSON sin validar nada— y ese control **pasó a la skill**. Con él se
+  fueron los diagnósticos del panel de JSON (ruta contenedora, rutas duplicadas, cobertura
+  del contrato). **No reimplementarlos acá.**
+
+---
+
+## 8. Convenciones de trabajo
+
+- **Plan corto y OK antes de tocar código.** Una fase por vez.
+- ❌ No hardcodear nada de un formulario puntual: los fixtures son fixtures, y vienen 80-100
+  formularios más.
+- ❌ No usar la API de alto nivel de `pdf-lib` para campos.
+- ❌ No desambiguar colisiones con contador ciego. El sufijo `_1.._n` de un troceado es
+  estructural y editable, no desambiguación.
+- ❌ No inventar lo que no se entiende: se reporta con el texto crudo.
+- ❌ No agregar dependencias sin avisar.
+- ✅ `npm run build` limpio + verificación real (y relectura del PDF escrito) antes de
+  commitear.
+- ✅ `fixtures/` gitignoreada; los tests que la necesitan se saltean si no está.
 
 ---
 
 ## 9. Próximos pasos abiertos
 
-0. **Etapa 0, huecos de vocabulario ficha↔PDF.** Quedan ~28 pares en `revisar` sobre el
-   CSC, y buena parte arranca de que la ficha y el PDF nombran la misma cosa distinto:
-   la ficha dice «Física» donde el PDF imprime «Cédula», así que esa casilla no se puede
-   anclar por texto y arrastra a las vecinas. Un diccionario de sinónimos editable por
-   formulario (o por producto) los cerraría sin tocar el algoritmo.
-1. **`SKILL.md` / `CLAUDE.md`** para la última milla híbrida (tomar el esqueleto
-   validado + la ficha y generar `autoFillConcat`, repeaters, enfermedades,
-   `excludeFromJson`).
-2. Seguir **cazando diferencias de forma** contra el golden (como fue el caso de
-   `salidaJSONSecundaria`) para que el esqueleto salga cada vez más cerca del 5919.
-3. Opcional: que el esqueleto salga **ya bindeado** al json main (con `_sourcePdf` y
-   `sourceMeta` reales) en un solo paso → validador en **0/0**.
+- Verificar el circuito con el formulario **1000484** (202 campos, 4 páginas) cuando estén
+  su PDF y su ficha. Hoy la evidencia es el CSC.
+- El `form-definition-test__2_.json` de Signframe para el CSC: serviría para confirmar el
+  `sourceMeta` verbatim contra un main real.
+- Sacar del `package.json` lo que quedó sin uso tras el recorte, si aparece algo (las tres
+  `@dnd-kit` ya salieron).

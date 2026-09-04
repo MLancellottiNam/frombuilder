@@ -27,7 +27,7 @@
 
 import type { PdfLeaf, Rect } from './pdfFields';
 import { compareReadingOrder } from './pdfFields';
-import { etiquetaPreferida, etiquetasDeLeaf, type TextItem } from './regiones';
+import { etiquetaPreferida, etiquetasDeLeaf, type TextItem } from './textoPdf';
 
 /** Distancia horizontal máxima para considerar un texto como rótulo del campo. */
 export const MAX_DIST_CANDIDATA = 260;
@@ -52,9 +52,37 @@ export interface FilaPaquete {
   multi_widget: string;
   origen: string;
   notas: string;
+  /**
+   * Lo que vino completado desde afuera, por nombre de columna. Se arrastra tal
+   * cual: la app no lo interpreta ni lo pisa.
+   */
+  externas?: Record<string, string>;
 }
 
-export const HEADERS_PAQUETE: (keyof FilaPaquete)[] = [
+/**
+ * Columnas que completa la SKILL, afuera. La app no las toca nunca: las escribe
+ * vacías la primera vez, las conserva cuando el paquete vuelve, y las vuelve a
+ * escribir al reexportar. El archivo tiene que poder dar vueltas sin perder
+ * información, porque es la única memoria del mapeo.
+ *
+ * `notas` es de la app (multi-widget, avisos de la col M), no de afuera.
+ */
+export const COLUMNAS_EXTERNAS = [
+  'seccion',
+  'subseccion',
+  'label',
+  'ruta_json',
+  'required',
+  'validaciones',
+  'grupo',
+  'valor',
+  'instancia',
+] as const;
+
+export type ColumnaExterna = (typeof COLUMNAS_EXTERNAS)[number];
+
+/** Lo que la app escribe, en orden. */
+export const HEADERS_APP: (keyof FilaPaquete)[] = [
   '#',
   'nombre_actual',
   'nombre_nuevo',
@@ -71,6 +99,9 @@ export const HEADERS_PAQUETE: (keyof FilaPaquete)[] = [
   'origen',
   'notas',
 ];
+
+/** El header completo: primero lo de la app, después lo de afuera. */
+export const HEADERS_PAQUETE: string[] = [...(HEADERS_APP as string[]), ...COLUMNAS_EXTERNAS];
 
 const r1 = (n: number) => Math.round(n * 10) / 10;
 
@@ -226,8 +257,105 @@ export function construirPaquete(e: EntradaPaquete): FilaPaquete[] {
   return filas;
 }
 
+/**
+ * El aoa que se escribe al xlsx. Las columnas de afuera se vuelven a escribir
+ * tal como vinieron: si el paquete dio una vuelta por la skill y volvió, al
+ * reexportarlo tiene que seguir teniendo todo. Y si el archivo trajo columnas
+ * que no conocemos, también viajan.
+ */
 export function paqueteAAoa(filas: FilaPaquete[]): (string | number)[][] {
-  return [HEADERS_PAQUETE as string[], ...filas.map((f) => HEADERS_PAQUETE.map((h) => f[h] ?? ''))];
+  const extrasVistas: string[] = [];
+  for (const f of filas) {
+    for (const k of Object.keys(f.externas ?? {})) {
+      if (!extrasVistas.includes(k) && !(COLUMNAS_EXTERNAS as readonly string[]).includes(k)) extrasVistas.push(k);
+    }
+  }
+  const header = [...HEADERS_PAQUETE, ...extrasVistas];
+  const valor = (f: FilaPaquete, h: string): string | number => {
+    if ((HEADERS_APP as string[]).includes(h)) return (f as unknown as Record<string, string | number>)[h] ?? '';
+    return f.externas?.[h] ?? '';
+  };
+  return [header, ...filas.map((f) => header.map((h) => valor(f, h)))];
+}
+
+export interface PaqueteLeido {
+  filas: FilaPaquete[];
+  /** columnas del archivo que no escribe la app */
+  columnasExternas: string[];
+  avisos: string[];
+}
+
+/**
+ * Lee un paquete (aoa del xlsx). Todo lo que no sea columna de la app se guarda
+ * en `externas` sin interpretarlo: es lo que resolvió la skill y la app no tiene
+ * derecho a tocarlo.
+ */
+export function leerPaqueteAoa(aoa: (string | number)[][]): PaqueteLeido {
+  const avisos: string[] = [];
+  const idx = aoa.findIndex((fila) => {
+    const c = (fila ?? []).map((x) => String(x ?? '').trim().toLowerCase());
+    return c.includes('nombre_actual') && c.includes('nombre_nuevo');
+  });
+  if (idx < 0) {
+    return { filas: [], columnasExternas: [], avisos: ['El archivo no tiene los encabezados del paquete de campos.'] };
+  }
+  const header = (aoa[idx] ?? []).map((x) => String(x ?? '').trim());
+  const propias = new Set(HEADERS_APP as string[]);
+  const columnasExternas = header.filter((h) => h && !propias.has(h));
+
+  const filas: FilaPaquete[] = [];
+  for (let i = idx + 1; i < aoa.length; i++) {
+    const celdas = aoa[i] ?? [];
+    if (celdas.every((c) => String(c ?? '').trim() === '')) continue;
+    const get = (h: string) => String(celdas[header.indexOf(h)] ?? '').trim();
+    const num = (h: string) => {
+      const v = Number(get(h));
+      return Number.isFinite(v) ? v : '';
+    };
+    const externas: Record<string, string> = {};
+    for (const h of columnasExternas) {
+      const v = get(h);
+      if (v) externas[h] = v;
+    }
+    filas.push({
+      '#': Number(get('#')) || 0,
+      nombre_actual: get('nombre_actual'),
+      nombre_nuevo: get('nombre_nuevo'),
+      tipo: get('tipo'),
+      pagina: num('pagina'),
+      x: num('x'),
+      y: num('y'),
+      w: num('w'),
+      h: num('h'),
+      etiqueta_impresa: get('etiqueta_impresa'),
+      etiquetas_candidatas: get('etiquetas_candidatas'),
+      texto_zona: get('texto_zona'),
+      multi_widget: get('multi_widget'),
+      origen: get('origen'),
+      notas: get('notas'),
+      externas,
+    });
+  }
+  const conExternas = filas.filter((f) => Object.keys(f.externas ?? {}).length > 0).length;
+  if (columnasExternas.length > 0) {
+    avisos.push(
+      `El paquete trae ${columnasExternas.length} columna(s) completadas afuera (${columnasExternas.join(', ')}) en ${conExternas} fila(s): se conservan tal cual.`,
+    );
+  }
+  return { filas, columnasExternas, avisos };
+}
+
+/** `nombre_actual` -> lo que vino de afuera, para arrastrarlo al reexportar. */
+export function externasPorCampo(filas: FilaPaquete[]): Map<string, Record<string, string>> {
+  const m = new Map<string, Record<string, string>>();
+  for (const f of filas) {
+    if (!f.nombre_actual) continue;
+    const e = f.externas ?? {};
+    if (Object.keys(e).length === 0) continue;
+    // Un campo con varios widgets tiene varias filas: la primera manda.
+    if (!m.has(f.nombre_actual)) m.set(f.nombre_actual, { ...e });
+  }
+  return m;
 }
 
 /** Cuántos widgets tienen etiqueta impresa (el número que mide si sirve). */
@@ -243,7 +371,7 @@ export function cobertura(filas: FilaPaquete[]): { total: number; conEtiqueta: n
 export async function paqueteAXlsx(filas: FilaPaquete[]): Promise<Uint8Array> {
   const XLSX = await import('xlsx');
   const ws = XLSX.utils.aoa_to_sheet(paqueteAAoa(filas));
-  ws['!cols'] = [
+  const anchos = [
     { wch: 5 },
     { wch: 30 },
     { wch: 30 },
@@ -260,8 +388,102 @@ export async function paqueteAXlsx(filas: FilaPaquete[]): Promise<Uint8Array> {
     { wch: 11 },
     { wch: 40 },
   ];
+  // una columna por cada externa, con ancho cómodo para leerlas
+  const aoa = paqueteAAoa(filas);
+  ws['!cols'] = aoa[0].map((_, i) => anchos[i] ?? { wch: 24 });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'campos');
   const out = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
   return new Uint8Array(out);
+}
+
+// --- presembrado desde la ficha -------------------------------------------
+
+export interface FilaFichaParaPaquete {
+  hoja: string;
+  fila: number;
+  /** col N: nombres del PDF que le corresponden */
+  campoPdfInterno: string;
+  /** col M */
+  campoJson: string;
+  /** col H */
+  obligatorio: string;
+  /** col K */
+  observaciones: string;
+  /** col G */
+  regla: string;
+  /** col D */
+  label: string;
+  /** col F */
+  valor: string;
+}
+
+/**
+ * Presiembra las columnas de afuera con lo que la ficha ya declara: la ruta
+ * (col M), la obligatoriedad (col H) y las validaciones (cols K y G).
+ *
+ * Es una SUGERENCIA y se dice: cada fila tocada lo anota en `notas`. Y **no pisa
+ * nada**: si el paquete volvió de la skill con esas columnas llenas, se dejan
+ * como están. Quien resolvió el mapeo con el formulario a la vista sabe más que
+ * la ficha.
+ */
+export function presembrarDesdeFicha(
+  filas: FilaPaquete[],
+  filasFicha: FilaFichaParaPaquete[],
+  derivarValidacion: (crudo: string) => { senales: string[]; reconocido: boolean },
+): { tocadas: number; avisos: string[] } {
+  const porNombre = new Map<string, FilaPaquete[]>();
+  for (const f of filas) {
+    if (!f.nombre_actual) continue;
+    if (!porNombre.has(f.nombre_actual)) porNombre.set(f.nombre_actual, []);
+    porNombre.get(f.nombre_actual)!.push(f);
+  }
+
+  let tocadas = 0;
+  const sinCampo: string[] = [];
+  for (const fila of filasFicha) {
+    const tokens = String(fila.campoPdfInterno ?? '')
+      .split(/[,;]/)
+      .map((s) => s.trim())
+      .filter((s) => s && !/^(no aplica|n\/a|na)$/i.test(s));
+    if (tokens.length === 0) continue;
+
+    // Las validaciones pueden estar en la col K o en la col G: en la ficha real
+    // conviven «50 caracteres alfanumericos» y «Alfanumérico (50)».
+    const vK = derivarValidacion(fila.observaciones);
+    const vG = derivarValidacion(fila.regla);
+    const senales = vK.senales.length ? vK.senales : vG.senales;
+
+    for (const token of tokens) {
+      const destinos = porNombre.get(token);
+      if (!destinos) {
+        sinCampo.push(token);
+        continue;
+      }
+      for (const f of destinos) {
+        const ext = (f.externas ??= {});
+        const antes = JSON.stringify(ext);
+        if (!ext.ruta_json && fila.campoJson.trim()) ext.ruta_json = fila.campoJson.trim();
+        if (!ext.required && fila.obligatorio.trim()) ext.required = fila.obligatorio.trim();
+        if (!ext.validaciones && senales.length) ext.validaciones = senales.join(' · ');
+        if (!ext.label && fila.label.trim()) ext.label = fila.label.trim();
+        if (!ext.valor && fila.valor.trim()) ext.valor = fila.valor.trim();
+        if (JSON.stringify(ext) === antes) continue;
+        tocadas++;
+        const nota = `presembrado desde la ficha ${fila.hoja}·${fila.fila} (sugerencia, revisar)`;
+        f.notas = f.notas ? (f.notas.includes('presembrado') ? f.notas : `${f.notas} · ${nota}`) : nota;
+      }
+    }
+  }
+
+  const avisos: string[] = [];
+  if (tocadas > 0) {
+    avisos.push(`${tocadas} fila(s) del paquete presembradas desde la ficha. Van marcadas como sugerencia en «notas».`);
+  }
+  if (sinCampo.length > 0) {
+    avisos.push(
+      `${new Set(sinCampo).size} nombre(s) de la col N de la ficha no existen en el PDF: ${[...new Set(sinCampo)].slice(0, 5).join(', ')}${sinCampo.length > 5 ? '…' : ''}.`,
+    );
+  }
+  return { tocadas, avisos };
 }
