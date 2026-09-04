@@ -27,7 +27,9 @@
 
 import type { PDFDict as TPDFDict, PDFRef as TPDFRef } from 'pdf-lib';
 import { readPdfFields } from './pdfFields';
+import type { Rect } from './pdfFields';
 import type { CampoCreado } from './camposManuales';
+import { mismoRect, type CambioRect } from './rects';
 
 /** Nombre actual (full name leído) -> nombre final que hay que escribir. */
 export type MapaRenombres = Map<string, string>;
@@ -41,6 +43,12 @@ export interface WritePdfOpts {
   creados?: CampoCreado[];
   /** Nombres ACTUALES de los campos detectados que hay que quitar. */
   borrados?: string[];
+  /**
+   * Geometría editada a mano (v2.0.0), por nombre ACTUAL del campo. Cada entrada
+   * dice `{rect original -> rect nuevo}`: se empareja por el rect y no por
+   * índice, porque el orden de los widgets al leer y al escribir no es el mismo.
+   */
+  rects?: Map<string, CambioRect[]>;
 }
 
 export interface WritePdfResult {
@@ -51,6 +59,8 @@ export interface WritePdfResult {
   creados: number;
   /** campos detectados que se quitaron */
   borrados: number;
+  /** widgets a los que se les cambió el /Rect */
+  movidos: number;
   /** campos tocados en total (todos se limpian, aunque no cambien de nombre) */
   campos: number;
   /** campos a los que se les borró algún valor (/V o /DV) */
@@ -86,7 +96,7 @@ export async function escribirPdfRenombrado(
   renombres: MapaRenombres,
   opts: WritePdfOpts = {},
 ): Promise<WritePdfResult> {
-  const { PDFDocument, PDFName, PDFDict, PDFArray, PDFString, PDFHexString, PDFRef } = await import('pdf-lib');
+  const { PDFDocument, PDFName, PDFDict, PDFArray, PDFNumber, PDFString, PDFHexString, PDFRef } = await import('pdf-lib');
   const warnings: string[] = [];
   const tope = opts.tamanoFuente ?? 10;
 
@@ -110,6 +120,19 @@ export async function escribirPdfRenombrado(
    */
   // eslint-disable-next-line no-control-regex
   const textoPdf = (s: string) => (/^[\x09\x0a\x0d\x20-\x7e]*$/.test(s) ? PDFString.of(s) : PDFHexString.fromText(s));
+
+  const leerRect = (v: unknown): Rect | null => {
+    if (!(v instanceof PDFArray) || v.size() < 4) return null;
+    const n = (i: number) => {
+      const x = v.lookup(i);
+      return x instanceof PDFNumber ? x.asNumber() : NaN;
+    };
+    const [x1, y1, x2, y2] = [n(0), n(1), n(2), n(3)];
+    if ([x1, y1, x2, y2].some((k) => !Number.isFinite(k))) return null;
+    return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+  };
+
+  let movidos = 0;
 
   const terminales: Terminal[] = [];
   const seen = new Set<string>();
@@ -234,7 +257,34 @@ export async function escribirPdfRenombrado(
       for (const w of t.widgets) w.set(PDFName.of('AS'), PDFName.of('Off'));
     }
 
-    // 6) tope de fuente
+    // 6) geometría editada a mano (v2.0.0): se empareja por el rect ORIGINAL
+    // del widget, no por índice. `readPdfFields` ordena los widgets por orden de
+    // lectura y acá se recorren en el orden de /Kids: con un índice se movería
+    // el widget equivocado sin que nadie lo note.
+    const cambios = opts.rects?.get(t.full);
+    if (cambios && cambios.length > 0) {
+      const usados = new Set<number>();
+      for (const w of t.widgets) {
+        const actual = leerRect(w.lookup(PDFName.of('Rect')));
+        if (!actual) continue;
+        const j = cambios.findIndex((c, i) => !usados.has(i) && mismoRect(c.desde, actual));
+        if (j < 0) continue;
+        usados.add(j);
+        const { hasta } = cambios[j];
+        w.set(
+          PDFName.of('Rect'),
+          ctx.obj([hasta.x, hasta.y, hasta.x + hasta.w, hasta.y + hasta.h]) as never,
+        );
+        movidos++;
+      }
+      if (usados.size < cambios.length) {
+        warnings.push(
+          `«${t.full}»: ${cambios.length - usados.size} rect(s) editado(s) no se pudieron emparejar con ningún widget del PDF.`,
+        );
+      }
+    }
+
+    // 7) tope de fuente
     if (opts.limitarFuente) {
       const da = t.dict.lookup(PDFName.of('DA'));
       const texto = decodeText(da);
@@ -357,6 +407,7 @@ export async function escribirPdfRenombrado(
     renombrados,
     creados: creados.length,
     borrados,
+    movidos,
     campos: esperados,
     limpiados,
     warnings,

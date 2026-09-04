@@ -195,78 +195,101 @@ Cada ítem que falla es **clickeable** y selecciona el campo.
 - **Proyecto** (.json) para guardar/cargar todo el estado, e **Importar JSON** de un
   form-definition existente (preserva `_sourcePdf`, ids y `sourceMeta`).
 
-### 5.8 Etapa 0 — Renombrado asistido (v1.0.0 → v1.5.0, + v1.4.1 … v1.4.5)
+### 5.8 Etapa 0 — Detector y editor de campos del PDF (v2.0.0)
 
-La ficha cruda del INS viene con la **col N vacía** y los AcroNames del PDF **mienten**
-(en el CSC `Profesión` es en realidad el Detalle del domicilio extranjero). Etapa 0 toma
-la **ficha cruda + el PDF crudo** y devuelve el **PDF renombrado** y la **ficha con la col N
-completada**, para que el bind de Etapa 2 sea 1:1 exacto.
+**El cambio de foco (v2.0.0).** De v1.0.0 a v1.4.5 Etapa 0 intentó resolver el mapeo
+ficha↔PDF con heurísticas: regiones geométricas, Needleman-Wunsch, anclas por etiqueta
+impresa, elegibilidad por región, umbrales de tokens. Cada versión agregaba una regla de
+desempate más fina y ganaba unos puntos. **El techo no era de calibración, era de
+naturaleza del problema: la ficha y el PDF no comparten ninguna clave.** La col N
+(«Nombre interno del campo en PDF») era LA clave y el INS la manda vacía —en el CSC las
+14 celdas «llenas» dicen literalmente «No aplica»—. Todo lo demás es reconstrucción.
 
-Módulos (`src/lib/etapa0/`):
+Y hay decisiones que no salen de ningún score, solo de entender el formulario:
+`asg_nacionalidad` cubre «País y lugar de nacimiento» **y** «Nacionalidad»; la ficha dice
+«Física» donde el PDF imprime «Cédula»; un grupo de 8 opciones que el PDF parte 5/4; dos
+campos rotulados «Detalle:» por región contra UNA fila de ficha.
+
+**Así que la app dejó de adivinar.** Se queda con lo que una máquina hace mejor que una
+persona —leer el AcroForm, medir geometría, extraer el texto impreso, escribir el PDF— y
+el mapeo se resuelve afuera, con juicio, sobre un paquete que la app exporta:
+
+```
+1. la app     detecta campos · geometría · etiquetas impresas
+              agregar / borrar / renombrar / mover / trocear a mano
+              -> EXPORTA el paquete de campos (xlsx) + el PDF
+2. afuera     se resuelve el mapeo leyendo formulario + ficha + paquete
+              -> devuelve los nombres
+3. la app     IMPORTA esos nombres -> escribe el PDF renombrado
+4. Signframe  subir el renombrado -> bajar el JSON main
+5. Etapa 1/2  esqueleto desde la ficha + bind 1:1 por sourceName
+```
+
+**El PDF es el único input obligatorio.** La ficha pasó a ser opcional y entra solo para
+importar nombres.
+
+Módulos vivos (`src/lib/etapa0/`):
 
 | archivo | qué hace |
 |---|---|
-| `fichaRaw.ts` | aplana las 13 hojas, detecta el header de 14 columnas y las **4 exclusiones**, más las **filas-nota** (col C con prosa descriptiva en vez de un nombre de campo). La señal de fila-nota es **estructural** —sin label (D), sin tipo (E), sin path JSON (M)— y se puntúa: el largo del texto es una señal débil a propósito, porque en el CSC las preguntas PEP tienen 16-23 palabras y son campos reales mientras «Dentro de datosFormulario» tiene 3 y es nota. Un marcador `NO APLICA` real cumple **3 condiciones** (`NO APLICA` + (`HOJA`\|`SECCION`) + `FORMULARIO`); nunca se escanean J ni N (usan “No aplica” como enum) y el marcador de bloque solo vale en col G. Precedencia: **contrato JSON primero** (`A === 'JSON'`), después hoja, bloque, sin-campo-pdf. Cada fila lleva `motivo` y `hojaAplica`. |
 | `pdfFields.ts` | walk **crudo** del AcroForm (no la API de alto nivel de pdf-lib). Orden de lectura `(page, -Y, X)`. Un nodo con kids sin `/T` es **un** campo con N widgets. Marca `multiWidgetSospechoso` (`/Tx` con >1 widget = colisión del PDF original). |
-| `acroName.ts` | instancias del bloque repetible (ASG/PJR/RPL, expansión **instancia-mayor**) y el nombre propuesto `prefijo + slug(C) + [slug(F)]`. El bloque repetible incluye sus **hojas hijas** según el índice (`datosFormulario.personas.direccion` es hija de `personas`, o sea el PDF la repite por instancia). Los grupos de opciones se detectan por **nombre base consecutivo** —la misma clave con la que se genera el nombre—, no por col D. Las colisiones **se marcan, no se desambiguan con contador ciego**. |
-| `align.ts` | Needleman-Wunsch con huecos tolerados. La señal confiable es la **posición**; el texto del AcroName solo **suma** (`BOOST_TEXTO`), nunca resta. El 1:N (fecha partida en día/mes/año) se modela **dentro del DP**, no en un post-paso. `alinearPorSegmentos` corre ese mismo algoritmo **por región** y nunca cruza el límite: una fila sin campo en su región queda huérfana en vez de robarle el campo a otra instancia. |
-| `camposManuales.ts` | **Crear y borrar campos** (v1.4.4). El PDF del INS no siempre tiene los campos que el formulario necesita: en el CSC las cuatro firmas son líneas **dibujadas** (115 widgets, cero `/Sig`) y la misma fecha de nacimiento está resuelta con UNA caja de 88pt en el asegurado y TRES de 22/22/31 en el representante. `aplicarCambios` devuelve la lista **efectiva** (detectados − borrados + creados) reordenada por orden de lectura, así que un campo creado cae en su lugar visual. `trocearRect` reparte un rect en N cajas parejas. Tiene que pasar acá porque el PDF renombrado se sube a Signframe y de ahí sale el `sourceMeta`. |
-| `camposManuales.ts` (identidad) | `ediciones`, `regiones` y `Segmento.leafIdxs` indexan por **posición**, así que crear o borrar corre todos los índices y el nombre nuevo se mudaría de campo en silencio. `remapearPorClave` remapea por identidad, y la identidad de un campo creado es un **`uid` propio que no depende de su nombre**: si fuera el nombre, borrar «X» y crear otro «X» reengancharía la edición al campo equivocado. |
-| `regiones.ts` (corridas) | **1:N de fechas** (v1.4.3 B0.2): una fila de tipo fecha se pinta a veces en varias cajas angostas y contiguas (día/mes/año). El DP ya lo modelaba pero nunca llegaba a evaluarlo: la fila se ancla a la primera caja por su etiqueta impresa y las anclas son 1:1, así que el arreglo es un **post-paso sobre las anclas**. El sufijo sale del formato de la col F (`dd/mm/aaaa` → `_dia/_mes/_ano`) y si no se puede derivar queda `_1.._n`; es editable. Un 1:N nunca queda en `alta`: el reparto por caja lo confirma una persona. Ojo: un texto de solo guiones bajos (`_____ / _____`) **no** es etiqueta — tomarlo por rótulo cortaba la corrida. |
-| `regiones.ts` (elegibilidad) | **Filtro de filas por región** (v1.4.3 A): una fila del bloque repetible solo se le ofrece a una instancia si su clave aparece **impresa** dentro de la región de esa instancia (col F si es opción y el valor sirve; col C si no). Acotar la geometría no alcanzaba: limita dónde puede caer una fila, no impide que el DP la meta en un hueco de esa región. Medido en el CSC: 32 filas quedan exclusivas de una región y los subsets salen **40/37/22** contra los ~44/40/25 esperados, sin ninguna grilla manual. Las filas que no aparecen en NINGUNA región quedan elegibles en todas: es el hueco de vocabulario (la ficha dice «Física», el PDF imprime «Cédula») y perder campos por eso sería peor. La cobertura parcial del match se usa solo para claves de 5 tokens o más, las que pdfjs parte en fragmentos. |
-| `regiones.ts` | **Anclas por texto** (Fix C): el PDF trae la etiqueta impresa al lado de cada campo y la col C de la ficha *es* esa etiqueta (col F para las opciones de un grupo). Los pares inequívocos quedan fijos y el DP alinea solo el resto; NO se exige monotonía, porque el desorden ficha↔PDF dentro del bloque es real y pedirla descarta justo las anclas que lo arreglan. Una opción cuyo grupo tiene anclas en la región pero que no aparece en ninguna etiqueta es **foránea**: vive en otra región y no se fuerza (así se reparten 5 física / 4 jurídica). También expone `evidenciaEnContra`: cuando la etiqueta impresa identifica a otra fila, o cuando una casilla cae en la banda de un grupo al que la fila no pertenece, el par se degrada a `revisar`. Los tramos libres se parten en **zonas contiguas** (`construirSegmentos`): juntos, "Lugar" y "Fecha" se iban a los campos de la firma del pie de la página 2. |
-| `regiones.ts` (regiones) | Cada instancia ocupa una **región** del PDF (rango contiguo del orden de lectura). Se siembra en dos pasos: (1) los **grupos de opciones** del bloque repetible se buscan en el texto del PDF y un grupo que aparece tantas veces como instancias ancla la banda *k* a la instancia *k*; (2) el borde exacto sale del **mayor salto vertical** entre campos consecutivos de la zona ambigua (en el CSC 27pt contra 20-21pt internos: cae en y=339). El cambio de página es un salto infinito. La siembra es orientativa: el usuario corrige `desdeLeaf`/`hastaLeaf` con dos selects por instancia y las regiones se pintan como bandas de color en el preview. |
-| `writePdf.ts` | escribe el PDF renombrado sobre el dict crudo: aplana `/AcroForm/Fields` (Signframe necesita nombres planos), baja los heredables (`FT`, `Ff`, `DA`, `Q`, `MaxLen`, `Opt`) antes de desenganchar el `/Parent`, limpia `/V` `/DV` `/TU` `/TM` `/RV`, pone `/AS /Off` en los `/Btn`, topea el tamaño de fuente del `/DA` (default 10pt) y setea `/NeedAppearances`. **Los renombrados circulares no necesitan nombre intermedio**: el renombre se aplica sobre la identidad del objeto, no sobre una tabla por nombre. |
-| `writeFicha.ts` | reescribe el mismo `.xlsx` completando **solo la col N** de las filas que van al PDF (solo-JSON y excluidas quedan vacías). Además `detectarAvisosColM`: erratas de tipeo **genéricas** (grafía inconsistente, no-ASCII, mayúscula inicial, espacios, punto doble) — **se reportan, no se corrigen**. |
-| `reporte.ts` | CSV con asignados, huérfanos de los dos lados, colisiones, avisos de col M y la nota de ausencia de `/Sig`. |
+| `paquete.ts` | **el paquete de campos**: una fila por WIDGET en orden de lectura, con `nombre_actual`, `nombre_nuevo`, tipo, página, rect, `etiqueta_impresa`, `etiquetas_candidatas`, `texto_zona`, `multi_widget`, `origen` y `notas`. Un campo con dos widgets da dos filas con el mismo `#` y el mismo `nombre_actual`: eso es justo lo que hay que ver. Tiene que ser **autosuficiente** — quien lo lee resuelve el mapeo con eso, la ficha y el PDF impreso, sin abrir la app. |
+| `importarNombres.ts` | cierra el circuito. Dos vehículos: el **paquete** con `nombre_nuevo` (directo y sin ambigüedad) y la **ficha** con la col N (matchea contra `nombre_actual` y aplica el nombre canónico de la fila, con sufijos 1:N del formato de la col F). **Nada se aplica a medias**: si algún nombre quedaría repetido se reporta y no se toca nada. **No pisa** lo editado a mano sin confirmación explícita. |
+| `camposManuales.ts` | crear y borrar campos. `aplicarCambios` devuelve la lista **efectiva** (detectados − borrados + creados) reordenada por orden de lectura. `trocearRect` reparte un rect en N cajas parejas. La identidad de un creado es un **`uid` propio que no depende de su nombre**: si fuera el nombre, borrar «X» y crear otro «X» reengancharía la edición al campo equivocado. |
+| `rects.ts` | **editar la geometría** (v2.0.0): mover y redimensionar, en detectados y creados. Dos claves a propósito: en la UI el override se indexa por `claveEstable#índiceDeWidget` sobre la lista ORIGINAL; para **escribir** se traduce a `{rect original -> rect nuevo}` y se empareja **por el rect**, porque `readPdfFields` ordena los widgets por orden de lectura y `writePdf` los recorre en el orden de `/Kids` —un índice movería el widget equivocado en silencio—. `aplicarRects` no reordena la lista de widgets (reordenarla haría que el próximo arrastre escribiera en la clave de otro) y arrastrar un borde no invierte la caja: topea en 4pt. |
+| `writePdf.ts` | escribe el PDF renombrado sobre el dict crudo: aplana `/AcroForm/Fields` (Signframe necesita nombres planos), baja los heredables (`FT`, `Ff`, `DA`, `Q`, `MaxLen`, `Opt`) antes de desenganchar el `/Parent`, limpia `/V` `/DV` `/TU` `/TM` `/RV`, pone `/AS /Off` en los `/Btn`, topea el `/DA`, setea `/NeedAppearances`, aplica creados, borrados y rects. Relee el resultado y exige nombres únicos. **Los renombrados circulares no necesitan nombre intermedio**: el renombre se aplica sobre la identidad del objeto, no sobre una tabla por nombre. |
+| `writePdfImpreso.ts` | el **PDF con los nombres impresos**: dibuja el borde de cada widget y su nombre en 5pt con el `#` del paquete adelante. Es una **copia visual para revisar sin la app** y NO se sube a Signframe. Acá sí se usa la API de dibujo de pdf-lib —la regla es no usarla para CAMPOS— y se guarda con `updateFieldAppearances:false` para no deshacer el `/NeedAppearances`. |
+| `fichaRaw.ts` | sigue siendo el lector multi-hoja del xlsx del INS (13 hojas, header de 14 columnas, col N). Su clasificación de destino (filas-nota, exclusiones, `NO APLICA`, precedencia JSON-first) quedó **sin uso en el flujo**: se conserva por si el mapeo vuelve a la app y porque el import de la col N lo usa para ubicar las filas. |
+| `regiones.ts` (lo que sobrevive) | `extraerTextoPdf` y `textItemDePdfjs` (texto impreso con pdfjs), `etiquetasDeLeaf` / `etiquetaPreferida` (rótulo de un widget: izquierda para `/Tx`, derecha para `/Btn`), `textoDeRegion` y `sufijosDeFormato`. Todo lo de regiones, bandas, anclas, elegibilidad, segmentos y evidencias quedó **dormido**. |
 
-UI (`src/components/etapa0/`), reorganizada en **v1.4.2** para mostrar el resultado y no
-el razonamiento del motor, y en **v1.4.5** partida en dos vistas:
+**Dormido, no borrado** (queda en el repo con todos sus tests, sin cablear desde la UI):
+`align.ts` completo (DP, segmentos, confianza, 1:N, huérfanos), `acroName.ts` completo
+(instancias, expansión, `generarNombres` —que el import de la col N sí usa para el nombre
+canónico—, colisiones, grupos de opciones), la mitad grande de `regiones.ts`, `reporte.ts`,
+`writeFicha.ts::escribirFichaConColN`, `ModoRevision.tsx` y la pantalla vieja en
+`Etapa0ScreenV1.tsx.bak` (con extensión `.bak` justamente para que no la compile tsc: sus
+props ya no existen). Si el enfoque nuevo se confirma, se limpia; los 480 asserts de
+librería siguen cubriéndolo mientras tanto, así que no se podre en silencio.
 
-- **Vista simple (default) vs. avanzada**, recordada en el proyecto. La simple deja
-  adelante solo lo que hay que decidir: los **3 pasos numerados** (archivos · revisión ·
-  descargar), la ficha del campo seleccionado y la tabla de campos con tres columnas
-  (nombre nuevo · estado · de qué fila sale). La avanzada agrega el diagnóstico del motor
-  —stats, instancias, regiones, tabla de la ficha, edición en lote, posiciones, tipo,
-  nombre actual del AcroForm— sin sacar ninguna función: **es lo mismo calculado, distinto
-  cuánto se muestra**. En la simple `media` y `revisar` se dicen igual (**revisar**):
-  la distinción es del motor, no del usuario, y sigue en la avanzada y en el CSV.
-- `PanelCampo` es la respuesta al click: el campo que se toca —en el PDF o en la tabla— se
-  abre con la **etiqueta que el PDF tiene impresa al lado**, el selector de fila **con
-  buscador** como control primario (elegir la fila propone el nombre), el nombre editable y
-  los botones de confirmar / dividir / borrar. Seleccionar además **lleva** hasta el campo:
-  la tabla scrollea su fila y el preview salta a su página y la centra. Antes solo se
-  pintaba, y con 111 filas la seleccionada quedaba fuera de pantalla.
-- **`Ver detalle`** (solo en la vista avanzada, colapsado y recuerda su estado) contiene
-  todo el diagnóstico sin perder nada: stats, tabla de la ficha, tabla de los 111 campos
-  con su bulk edit, instancias, regiones y sus avisos, filas sin campo y avisos de col M.
-- `ModoRevision` recorre de a uno **solo** los campos que necesitan atención
-  (media/revisar/sin asignar) con los mismos controles de la tabla, y el preview hace zoom
-  para que se lea la etiqueta impresa alrededor del campo. `Confirmar` saca el campo de la
-  lista (es estado de UI, no re-clasifica nada); `Saltar` avanza sin marcar.
-- El **hand-off** aparece recién al descargar el PDF renombrado, con los pasos que siguen.
-- `TablaCampos` (tabla editable centrada en el campo del PDF, con bulk edit y colisiones en
-  rojo) y `PdfPreview` (render con `pdfjs-dist` + overlay clickeable, azul=alta,
-  ámbar=media/revisar, rojo=colisión, gris=sin asignar, bandas de región de fondo, con la
-  **leyenda de colores** a la vista desde v1.4.5).
+UI (`src/components/etapa0/`): dos paneles.
+
+- **Izquierda: la tabla de campos.** `#` · nombre actual · → · nombre nuevo (editable, con
+  colisiones en vivo) · tipo · origen · ✕ / dividir / borrar. Buscador, **filtros**
+  (`sin nombre` · `con colisión` · `creados` · `multi-widget`), **bulk edit** (prefijo,
+  sufijo, buscar-reemplazar sobre la selección) y `Posiciones`.
+- **`PanelCampo`** es la respuesta al click: el campo que se toca —en el PDF o en la
+  tabla— se abre con la **etiqueta que el PDF tiene impresa al lado**, el **texto de su
+  zona**, el nombre, el tipo y la **caja editable con números** (para alinear con la de al
+  lado, escribir el valor es más preciso que el mouse). Seleccionar además **lleva** hasta
+  el campo: la tabla scrollea su fila y el preview salta a su página y la centra.
+- **Derecha: el preview.** Overlay por widget con el nombre final, leyenda de colores
+  (azul = con nombre nuevo · gris = sin nombre · rojo = repetido · punteado = creado),
+  `+ Agregar campo` (dibujar el rect) y, en el campo seleccionado, **8 tiradores** para
+  mover y redimensionar. Click bidireccional tabla↔overlay.
+- **Barra superior**: contadores (`N campos (M widgets) · K con nombre · C colisiones`),
+  las **tres descargas** —`PDF renombrado` (el que se sube a Signframe), `PDF con nombres
+  impresos` (para revisar, no se sube) y `Paquete de campos (xlsx)`— y `Cargar nombres`.
+  Las tres descargas están disponibles **sin ficha**.
 
 Dos detalles de scroll que costaron una vuelta: el salto a un campo de otra página no puede
 hacerse en el mismo tick que el `setPage` —la caja todavía no existe—, así que va en un
-efecto atado a las cajas ya renderizadas; y traer una fila a la vista con `scrollIntoView`
-arrastra también los contenedores de arriba, así que la tabla mueve **solo** su propia caja
-calculando el delta a mano.
+efecto atado a las cajas ya renderizadas, y solo **una vez por (campo, página)** o la página
+salta abajo del puntero mientras se arrastra; y traer una fila a la vista con
+`scrollIntoView` arrastra también los contenedores de arriba, así que la tabla mueve **solo**
+su propia caja calculando el delta a mano.
 
-Sobre el conteo de filas sin campo: la alineación corre **solo** sobre las filas
-clasificadas como `pdf`, así que ninguna `solo-json` ni `excluida` entra nunca. De las 71
-que quedaban sin campo en el CSC, **70 son filas del bloque repetible que no aplican a su
-instancia** —el subset por geometría funcionando— y **1** es huérfana de verdad. Se muestran
-separadas: llamarlas todas «huérfanas» asustaba sin motivo.
+El aviso duro se queda: **el renombrado va siempre antes de subir el PDF a Signframe**; si
+entra antes, el `sourceMeta` queda clavado a los nombres genéricos del AcroForm. El estado
+de Etapa 0 (ediciones, creados, borrados, rects editados, tope de fuente, descargas hechas)
+se guarda dentro del **proyecto .json**; los archivos no viajan.
 
-El hand-off es un checklist de 4 pasos y **“Continuar a Etapa 1” queda deshabilitado hasta
-descargar el PDF renombrado**: si el PDF entra a Signframe antes del renombrado, el
-`sourceMeta` queda clavado a los nombres genéricos. El estado de Etapa 0 (instancias,
-ediciones, tope de fuente, descargas hechas) se guarda dentro del **proyecto .json**; los
-archivos no viajan.
+**Medido sobre el CSC real (sin cargar la ficha):** 111 campos / 115 widgets detectados;
+el paquete sale con **115 de 115 widgets con etiqueta impresa o candidatas** y 114 con
+texto de zona (la alineación anclaba 67, porque anclar exigía además matchear una fila de
+la ficha); el PDF impreso rotula **115 de 115** widgets y los nombres se extraen como
+texto; el circuito completo —crear un `/Sig`, borrar un detectado, trocear otro en 3, mover
+una caja, bajar el paquete, editarlo afuera, reimportarlo y escribir— deja **114 campos,
+114 nombres únicos, 0 duplicados**, con el creado presente y el borrado ausente.
 
 ---
 
