@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test:etapa0": "esbuild tests/etapa0.fichaRaw.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.fichaRaw.cjs --log-level=error && node .tmp/etapa0.fichaRaw.cjs",
     "test:mapping": "esbuild tests/matrixMapping.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/matrixMapping.cjs --log-level=error && node .tmp/matrixMapping.cjs",
-    "test": "npm run test:mapping && npm run test:etapa0 && npm run test:pdf && npm run test:acroname && npm run test:align && npm run test:write && npm run test:regiones && npm run test:manuales && npm run test:paquete && npm run test:impreso && npm run test:rects && npm run test:importar && npm run test:e1anchos",
+    "test": "npm run test:mapping && npm run test:etapa0 && npm run test:pdf && npm run test:acroname && npm run test:align && npm run test:write && npm run test:regiones && npm run test:manuales && npm run test:paquete && npm run test:impreso && npm run test:rects && npm run test:importar && npm run test:e1anchos && npm run test:e1gen",
     "test:pdf": "esbuild tests/etapa0.pdfFields.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.pdfFields.cjs --log-level=error && node .tmp/etapa0.pdfFields.cjs",
     "test:acroname": "esbuild tests/etapa0.acroName.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.acroName.cjs --log-level=error && node .tmp/etapa0.acroName.cjs",
     "test:align": "esbuild tests/etapa0.align.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.align.cjs --log-level=error && node .tmp/etapa0.align.cjs",
@@ -22,7 +22,8 @@
     "test:impreso": "esbuild tests/etapa0.impreso.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.impreso.cjs --log-level=error --external:pdfjs-dist && node .tmp/etapa0.impreso.cjs",
     "test:rects": "esbuild tests/etapa0.rects.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.rects.cjs --log-level=error && node .tmp/etapa0.rects.cjs",
     "test:importar": "esbuild tests/etapa0.importar.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.importar.cjs --log-level=error --external:xlsx && node .tmp/etapa0.importar.cjs",
-    "test:e1anchos": "esbuild tests/etapa1.anchos.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa1.anchos.cjs --log-level=error && node .tmp/etapa1.anchos.cjs"
+    "test:e1anchos": "esbuild tests/etapa1.anchos.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa1.anchos.cjs --log-level=error && node .tmp/etapa1.anchos.cjs",
+    "test:e1gen": "esbuild tests/etapa1.generar.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa1.generar.cjs --log-level=error --external:xlsx && node .tmp/etapa1.generar.cjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",

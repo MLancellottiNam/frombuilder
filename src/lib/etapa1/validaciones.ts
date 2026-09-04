@@ -72,8 +72,13 @@ export function derivarValidacion(crudo: string): ValidacionDerivada {
     out.senales.push('patrón de correo');
   }
 
-  // cantidad + unidad. «8 dígitos», «150 caracteres», «hasta 30 caracteres»
-  const m = t.match(/(\d+)\s*(digitos?|numeros?|caracteres?|letras?)/);
+  // cantidad + unidad. «8 dígitos», «150 caracteres», «hasta 30 caracteres» y
+  // también la forma con paréntesis que usa la col G del CSC:
+  // «Alfanumérico (50)» —y su typo real «Alfanumércico(50)»—.
+  let t2 = t;
+  const paren = t.match(/(alfanumer\w*|numeric\w*|texto)\s*\((\d+)\)/);
+  if (paren) t2 = `${paren[2]} caracteres ${paren[1]}`;
+  const m = t2.match(/(\d+)\s*(digitos?|numeros?|caracteres?|letras?)/);
   if (m) {
     const n = Number(m[1]);
     const unidad = m[2];
@@ -83,7 +88,7 @@ export function derivarValidacion(crudo: string): ValidacionDerivada {
       if (/digito|numero/.test(unidad)) {
         // Solo dígitos: además del tope, el patrón. Si el texto dice
         // «alfanumérico» no se fuerza numérico aunque diga «dígitos».
-        if (!/alfanumeric/.test(t)) {
+        if (!/alfanumer/.test(t)) {
           out.validationPattern = out.validationPattern ?? PATRON_NUMERICO;
           out.senales.push('solo dígitos');
         }
@@ -99,7 +104,7 @@ export function derivarValidacion(crudo: string): ValidacionDerivada {
 
   // alfanumérico explícito, sin tope: no se pone patrón (dejaría afuera
   // acentos, guiones y puntos que el INS sí usa). Se anota como señal.
-  if (/alfanumeric/.test(t)) out.senales.push('alfanumérico');
+  if (/alfanumer/.test(t)) out.senales.push('alfanumérico');
 
   // «obligatorio» a veces se cuela en la col K; lo maneja la col H.
   if (/obligatorio|requerido/.test(t)) out.senales.push('menciona obligatoriedad (la decide la col H)');
