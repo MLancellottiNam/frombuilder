@@ -97,6 +97,7 @@ export interface Diagnostico {
     | 'grafia-sospechosa'
     | 'colision-de-ruta'
     | 'indice-repetido'
+    | 'ruta-contenedora'
     | 'hueco';
   severidad: Severidad;
   mensaje: string;
@@ -159,6 +160,22 @@ export function construirPayload(e: EntradaPayload): ResultadoPayload {
   const porRuta = new Map<string, string[]>();
   const escritas = new Set<string>();
 
+  /**
+   * Rutas que son el NODO PADRE de otra ruta. Escribir un valor ahí reemplaza el
+   * objeto entero y se lleva puesto todo el subárbol: en el CSC eran tres filas
+   * apuntando a `datosFormulario.personas[i]` (el nodo de la persona, sin hoja),
+   * y borraban los ~35 campos de cada persona. En el payload no se ve el
+   * problema, se ve el resultado: 25 hojas escritas en vez de 115.
+   */
+  const todasLasRutas = new Set(
+    campos
+      .filter((c) => (c.salidaJSON || c.jsonOutputPath) && !c.excludeFromJson)
+      .map((c) => (c.salidaJSON ?? c.jsonOutputPath)!),
+  );
+  const contenedoras = new Set(
+    [...todasLasRutas].filter((a) => [...todasLasRutas].some((b) => b !== a && b.startsWith(a + '.'))),
+  );
+
   for (const campo of campos) {
     const ruta = campo.salidaJSON ?? campo.jsonOutputPath ?? null;
 
@@ -178,6 +195,8 @@ export function construirPayload(e: EntradaPayload): ResultadoPayload {
     porRuta.get(ruta)!.push(campo.id);
 
     if (campo.excludeFromJson) continue;
+    // No se escribe en un nodo contenedor: se reporta.
+    if (contenedoras.has(ruta)) continue;
 
     const valor = valorDeCampo(campo, e.valores[campo.id]);
     if (valor === undefined) continue;
@@ -221,6 +240,17 @@ export function construirPayload(e: EntradaPayload): ResultadoPayload {
         ruta,
       });
     }
+  }
+
+  for (const ruta of contenedoras) {
+    const hijas = [...todasLasRutas].filter((b) => b !== ruta && b.startsWith(ruta + '.')).length;
+    diagnosticos.push({
+      tipo: 'ruta-contenedora',
+      severidad: 'error',
+      mensaje: `«${ruta}» es el nodo padre de ${hijas} rutas: escribir un valor ahí reemplazaría el objeto entero y borraría esos ${hijas} datos. El campo necesita su propia hoja en la ruta.`,
+      campos: porRuta.get(ruta) ?? [],
+      ruta,
+    });
   }
 
   // --- índices de instancia repetidos ------------------------------------
@@ -290,10 +320,11 @@ export function valorDeEjemplo(campo: Field, i: number): unknown {
     case 'checkbox':
       return true;
     case 'radio':
-      // Solo la PRIMERA opción del grupo: marcar todas sería un payload falso.
-      return campo.radioGroupFields && campo.radioGroupFields.length > 0
-        ? (campo.order ?? 1) === 1
-        : true;
+      // Una sola opción por grupo —marcar todas sería un payload falso— y la
+      // que se marca es la que LLEVA la ruta (`excludeFromJson: false`). Elegir
+      // «la primera por order» dejaba grupos enteros sin escribir nada, porque
+      // la portadora de la ruta no siempre es la primera del renglón.
+      return !campo.excludeFromJson;
     case 'number':
       return 1000 + i;
     case 'date':

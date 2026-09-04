@@ -29,7 +29,7 @@ export type Selection =
   | null;
 
 /** Pantalla activa: inicio (elegir etapa), el workspace, o Etapa 0. */
-export type View = 'home' | 'builder' | 'etapa0';
+export type View = 'home' | 'builder' | 'etapa0' | 'etapa1';
 
 interface StoreState {
   project: Project;

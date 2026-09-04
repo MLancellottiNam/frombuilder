@@ -16,6 +16,7 @@ import Canvas from './components/Canvas';
 import Inspector from './components/Inspector';
 import Home from './components/Home';
 import Etapa0Screen from './components/etapa0/Etapa0Screen';
+import Etapa1Screen from './components/etapa1/Etapa1Screen';
 
 /** Locate a field's subsection id and index within it. */
 function locateField(fieldId: string) {
@@ -95,6 +96,7 @@ export default function App() {
 
   if (view === 'home') return <Home />;
   if (view === 'etapa0') return <Etapa0Screen />;
+  if (view === 'etapa1') return <Etapa1Screen />;
 
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={onDragStart} onDragEnd={onDragEnd}>
