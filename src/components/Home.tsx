@@ -185,13 +185,14 @@ export default function Home() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <EtapaCard
             n="1"
-            titulo="Armar el esqueleto"
+            titulo="Generar el formulario"
             icon={<Table2 size={15} />}
-            necesita="Ficha ya mapeada (col N llena), xlsx o CSV"
-            produce="Secciones → subsecciones → campos ordenados, con radios y condiciones"
-            comoSeUsa="Adentro: botón «Matriz» → modo «Etapa 1 · Armar ordenado»."
-            cta="Ir al workspace"
-            onClick={() => setView('builder')}
+            badge={BADGE}
+            necesita="Ficha con la col N llena + el JSON main de Signframe"
+            produce="El formulario armado, navegable por pasos, y el JSON que escribe"
+            comoSeUsa="Adentro: cargar los tres archivos, «Generar», y revisar en dos paneles: el formulario y su payload en vivo."
+            cta="Ir a generar"
+            onClick={() => setView('etapa1')}
           />
           <EtapaCard
             n="2"

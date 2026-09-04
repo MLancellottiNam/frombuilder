@@ -293,6 +293,69 @@ una caja, bajar el paquete, editarlo afuera, reimportarlo y escribir— deja **1
 
 ---
 
+### 5.9 Etapa 1 — Generador con preview de formulario y JSON en vivo (v3.0.0)
+
+Etapa 1 dejó de ser un armador manual (pool + canvas + drag&drop). Andaba, pero era lento
+y no contestaba las dos preguntas que importan: **¿cómo se ve el formulario?** y **¿qué JSON
+escribe?** La segunda no se podía ver en ningún lado hasta probarla en Signframe.
+
+Ahora es: **cargar → generar → revisar en dos paneles**, y los dos están conectados. Al
+llenar un campo, el valor aparece en su ruta del JSON; al clickear una ruta, se resalta el
+campo que la escribe. No hay preview del PDF a propósito, y no hay edición inline sobre la
+preview: se edita en el panel lateral, que es el **Inspector que ya existía**.
+
+Tres archivos, uno obligatorio: la **ficha con la col N llena** (secciones, labels, tipos,
+opciones, validaciones y rutas), el **JSON main de Signframe** (recomendado: trae el
+`sourceMeta` real) y un **form-def de referencia** (opcional, para copiarle patrones como
+sugerencia con diff).
+
+Módulos (`src/lib/etapa1/`):
+
+| archivo | qué hace |
+|---|---|
+| `desdeFicha.ts` | el generador. **No duplica nada**: el lector es `fichaRaw.ts` (el mismo de Etapa 0, que reemplaza a `parseTable` —single-sheet, se quedaba con la hoja de más filas y tiraba las otras nueve—), la estructura la arma `materializeMatrix` y las instancias las expande `acroName.ts`. Agrega el cruce con el main (tipos y anchos), las reglas en prosa, las rutas con índice de instancia (`personas[i]`, indexando el nodo RAÍZ del bloque) y los huecos de la última milla. |
+| `anchos.ts` | el ancho sale del `rect` del main. El ancho útil se deriva del propio main (mínimo X y máximo X+W) y se usa **uno para todo el documento** (la mediana de las páginas): con un útil por página, el mismo campo de 382pt caía en dos escalones distintos según la página, porque la página 1 del CSC tiene una banda vertical que le come 29pt. Las casillas quedan afuera de la escala —su rect es el cuadradito de 10pt— y ocupan su renglón. |
+| `validaciones.ts` | parser de las reglas de formato: `«8 dígitos»` → tope + patrón numérico, `«150 caracteres alfanuméricos»` → solo tope, `«Formato dd/mm/aaaa»` → `jsonDateFormat`, `«Formato de correo»` → patrón. Lo que no se entiende **no se inventa**: queda `reconocido: false` con el texto crudo. Un `maxLength` inventado corta datos del cliente en producción. |
+| `reglas.ts` | las reglas escritas en prosa. `«Solo aplica cuando código de persona es "ASG" y "RPL"»` → a qué instancias aplica la fila; `«Si se escoge "SI" se debe mostrar el campo "X"»` → condicional con `equals`; `«Concatenar automatico»` → hueco de `autoFillConcat`. Cada parser trabaja sobre **su cláusula**: una celda trae dos frases pegadas y sin partirlas los códigos de instancia se llevaban «SI» y «Detalle el Cargo» de premio. |
+| `payload.ts` | el JSON de salida y sus diagnósticos: campo sin ruta, radios que se pisan, grafía sospechosa, colisión de ruta, índice de instancia repetido, **ruta contenedora** y los huecos. Más la cobertura del contrato (rutas declaradas vs escritas, comparadas sin índices o mediría cualquier cosa) y los valores de ejemplo para ver el payload entero sin tipear 200 campos. |
+
+**Hallazgos del fixture real que cambiaron el diseño:**
+
+1. El patrón `«se despliegan los campos: A / B»` que se daba por dominante **no aparece ni
+   una vez** en la ficha del CSC. Lo que aparece son 48 filas declarando a qué instancias
+   aplican: es el subset por instancia dicho en palabras, lo mismo que Etapa 0 deducía de la
+   geometría. Sin leerlo, el asegurado hereda los campos de la persona jurídica.
+2. Las validaciones no viven solo en la col K: la col G también trae `«Alfanumérico (50)»` y
+   `«Formato DD/MM/AAAA»`. Se leen las dos.
+3. `«JSON»` en la col A no es el nombre de un paso: es la marca de fila de contrato. Sin
+   tratarlo aparte, el formulario salía con cuatro secciones llamadas «JSON». Y el índice del
+   INS declara que `encabezado` tiene paso «No aplica»: esa sección va oculta con
+   `hidden: true` + `conditionalVisibility: null`, nunca `NEVER_EXISTS`.
+4. **Tres campos escribían en el nodo contenedor** (`datosFormulario.personas[i]`, sin hoja).
+   Escribir un valor ahí reemplaza el objeto entero: el payload salía con **25 hojas en vez
+   de 112**. No se ve en el JSON —se ve el resultado— y lo cazó el panel en vivo. Ahora no se
+   escribe ahí y se reporta como error.
+
+**Medido sobre el CSC** (ficha con col N generada por el motor de Etapa 0 + main derivado del
+PDF renombrado): 9 hojas · 6 secciones · 14 subsecciones · **163 campos**, 88 con `sourceMeta`
+verbatim, **0 sin vincular**, ids por la Regla de Oro, anchos 122 full / 26 quarter / 10 third
+/ 5 half (útil 539.5pt), cobertura 62 rutas escritas de 75 declaradas, 28 diagnósticos (12
+colisiones de ruta, 10 grafías sospechosas, 3 rutas contenedoras, 1 sin ruta, 2 huecos) y el
+**validador en 0 ERROR**.
+
+Lo que **no** hace: la última milla (`autoFillConcat`, repeaters con `slotMappings`,
+`excludeFromJson` masivo, `jsonValueSecundario`) sigue en la skill `signframe-form-def`. Acá
+se **detecta y se marca como hueco**, no se genera.
+
+Queda **sin uso** (no borrado): `Pool.tsx`, `Canvas.tsx`, el `DndContext` de `App.tsx` con
+`placeSourceField`/`moveField`/`project.pool` —y con eso las tres dependencias `@dnd-kit/*`,
+que **no se sacan del `package.json` hasta confirmarlo**—, `MatrixImportDialog`,
+`MatrixExplorer`, `CsvImportDialog`, y de `matrix.ts` el `parseTable` para la ficha (sigue
+vivo para el main) y `guessMatrixMapping`. `UnirDialog` sobrevive como excepción, solo para
+los campos que no bindearon. El workspace viejo sigue accesible desde el botón «Workspace».
+
+---
+
 ## 6. Estado verificado (evidencia)
 
 Con la ficha real `Book1_MAPEADO_v1.xlsx` (403 filas, formato INS):
