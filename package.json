@@ -1,7 +1,7 @@
 {
   "name": "frombuilder",
   "private": true,
-  "version": "3.0.0",
+  "version": "3.1.0",
   "type": "module",
   "description": "Signframe Form-Definition Builder (visual)",
   "scripts": {
@@ -10,8 +10,9 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test:etapa0": "esbuild tests/etapa0.fichaRaw.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.fichaRaw.cjs --log-level=error && node .tmp/etapa0.fichaRaw.cjs",
-    "test": "npm run test:etapa0 && npm run test:pdf && npm run test:write && npm run test:manuales && npm run test:rects && npm run test:paquete && npm run test:importar && npm run test:impreso",
+    "test": "npm run test:etapa0 && npm run test:pdf && npm run test:names && npm run test:write && npm run test:manuales && npm run test:rects && npm run test:paquete && npm run test:importar && npm run test:impreso",
     "test:pdf": "esbuild tests/etapa0.pdfFields.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.pdfFields.cjs --log-level=error && node .tmp/etapa0.pdfFields.cjs",
+    "test:names": "esbuild tests/etapa0.names.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.names.cjs --log-level=error && node .tmp/etapa0.names.cjs",
     "test:write": "esbuild tests/etapa0.write.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.write.cjs --log-level=error && node .tmp/etapa0.write.cjs",
     "test:manuales": "esbuild tests/etapa0.camposManuales.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.camposManuales.cjs --log-level=error && node .tmp/etapa0.camposManuales.cjs",
     "test:paquete": "esbuild tests/etapa0.paquete.test.ts --bundle --platform=node --format=cjs --outfile=.tmp/etapa0.paquete.cjs --log-level=error --external:pdfjs-dist --external:xlsx && node .tmp/etapa0.paquete.cjs",
