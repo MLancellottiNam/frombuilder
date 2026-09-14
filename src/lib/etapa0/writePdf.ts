@@ -26,6 +26,7 @@
 // ---------------------------------------------------------------------------
 
 import type { PDFDict as TPDFDict, PDFRef as TPDFRef } from 'pdf-lib';
+import { parcharNamesPdfLib } from './pdfNames';
 import { readPdfFields } from './pdfFields';
 import type { Rect } from './pdfFields';
 import type { CampoCreado } from './camposManuales';
@@ -97,6 +98,7 @@ export async function escribirPdfRenombrado(
   opts: WritePdfOpts = {},
 ): Promise<WritePdfResult> {
   const { PDFDocument, PDFName, PDFDict, PDFArray, PDFNumber, PDFString, PDFHexString, PDFRef } = await import('pdf-lib');
+  parcharNamesPdfLib(PDFName);
   const warnings: string[] = [];
   const tope = opts.tamanoFuente ?? 10;
 

@@ -16,6 +16,7 @@
 
 // Type-only: TypeScript los borra al compilar, así que pdf-lib sigue siendo lazy.
 import type { PDFDict as TPDFDict, PDFRef as TPDFRef } from 'pdf-lib';
+import { parcharNamesPdfLib } from './pdfNames';
 
 export interface Rect {
   /** esquina inferior izquierda (coordenadas PDF, origen abajo-izquierda) */
@@ -91,6 +92,7 @@ export function compareReadingOrder(a: { page: number; rect: Rect }, b: { page: 
  */
 export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<PdfFieldsResult> {
   const { PDFDocument, PDFName, PDFDict, PDFArray, PDFString, PDFHexString, PDFNumber, PDFRef } = await import('pdf-lib');
+  parcharNamesPdfLib(PDFName);
   const warnings: string[] = [];
 
   const doc = await PDFDocument.load(data, { ignoreEncryption: true, updateMetadata: false, throwOnInvalidObject: false });
