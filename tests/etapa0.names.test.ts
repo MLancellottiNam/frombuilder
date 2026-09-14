@@ -15,9 +15,10 @@
 // exactamente lo que hace el generador de los formularios del INS.
 // ---------------------------------------------------------------------------
 
-import { PDFDocument, PDFName, PDFDict, PDFArray, PDFString, PDFRef } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFDict, PDFArray, PDFRef } from 'pdf-lib';
 import { readPdfFields } from '../src/lib/etapa0/pdfFields';
 import { escribirPdfRenombrado } from '../src/lib/etapa0/writePdf';
+import { pdfConCasilla, latin1 } from './helpers/pdfCasilla';
 
 let fail = 0;
 const ok = (c: boolean, m: string) => {
@@ -27,57 +28,7 @@ const ok = (c: boolean, m: string) => {
   } else console.log('PASS: ' + m);
 };
 
-const latin1 = (b: Uint8Array) => Array.from(b, (c) => String.fromCharCode(c)).join('');
-const bytes = (s: string) => Uint8Array.from(Array.from(s, (c) => c.charCodeAt(0)));
 const hex = (b: Uint8Array) => Array.from(b, (c) => c.toString(16).padStart(2, '0')).join(' ');
-
-/**
- * Casilla con estado de exportación acentuado. `caso` decide cómo queda
- * escapado en el archivo: pdf-lib siempre escribe MAYÚSCULA, así que para el
- * caso real hay que bajarlo a mano sobre los bytes (mismo largo: el xref sigue
- * siendo válido).
- */
-async function pdfConCasilla(caso: 'minuscula' | 'mayuscula'): Promise<Uint8Array> {
-  const doc = await PDFDocument.create();
-  const page = doc.addPage([300, 300]);
-  const ctx = doc.context;
-
-  const apariencia = () =>
-    ctx.register(
-      ctx.stream('', {
-        Type: PDFName.of('XObject'),
-        Subtype: PDFName.of('Form'),
-        BBox: ctx.obj([0, 0, 12, 12]),
-      }),
-    );
-
-  const campo = ctx.obj({
-    Type: PDFName.of('Annot'),
-    Subtype: PDFName.of('Widget'),
-    FT: PDFName.of('Btn'),
-    T: PDFString.of('casilla'),
-    Rect: ctx.obj([50, 200, 62, 212]),
-    F: ctx.obj(4),
-    P: page.ref,
-    // el PDF viene marcado: el renombrado tiene que limpiar /V y /AS...
-    V: PDFName.of('Sí'),
-    AS: PDFName.of('Sí'),
-    // ...pero NO el /AP, que es el que define el estado.
-    AP: ctx.obj({ N: ctx.obj({ ['Sí']: apariencia(), Off: apariencia() }) }),
-    MK: ctx.obj({ BC: ctx.obj([0, 0, 0]) }),
-  });
-  const ref = ctx.register(campo);
-  page.node.set(PDFName.of('Annots'), ctx.obj([ref]));
-  doc.catalog.set(
-    PDFName.of('AcroForm'),
-    ctx.obj({ Fields: ctx.obj([ref]), DA: PDFString.of('/Helv 0 Tf 0 g') }),
-  );
-
-  // Sin object streams para poder tocar los bytes del name.
-  const crudo = await doc.save({ useObjectStreams: false });
-  if (caso === 'mayuscula') return crudo;
-  return bytes(latin1(crudo).split('#ED').join('#ed'));
-}
 
 /** Las claves del /AP/N de la única casilla del PDF, tal como están escritas. */
 async function estadosDe(data: Uint8Array): Promise<PDFName[]> {
