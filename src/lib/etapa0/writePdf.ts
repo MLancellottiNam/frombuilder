@@ -28,7 +28,7 @@
 import type { PDFDict as TPDFDict, PDFRef as TPDFRef } from 'pdf-lib';
 import { parcharNamesPdfLib } from './pdfNames';
 import { readPdfFields } from './pdfFields';
-import type { Rect } from './pdfFields';
+import type { EstadosExportacion, Rect } from './pdfFields';
 import type { CampoCreado } from './camposManuales';
 import { mismoRect, type CambioRect } from './rects';
 
@@ -62,6 +62,12 @@ export interface WritePdfResult {
   borrados: number;
   /** widgets a los que se les cambió el /Rect */
   movidos: number;
+  /** rects editados a mano que no se pudieron emparejar con ningún widget */
+  sinEmparejar: number;
+  /** widgets totales del PDF generado */
+  widgets: number;
+  /** estados de exportación del PDF generado (v3.4.0) */
+  estados: EstadosExportacion;
   /** campos tocados en total (todos se limpian, aunque no cambien de nombre) */
   campos: number;
   /** campos a los que se les borró algún valor (/V o /DV) */
@@ -135,6 +141,7 @@ export async function escribirPdfRenombrado(
   };
 
   let movidos = 0;
+  let sinEmparejar = 0;
 
   const terminales: Terminal[] = [];
   const seen = new Set<string>();
@@ -280,6 +287,7 @@ export async function escribirPdfRenombrado(
         movidos++;
       }
       if (usados.size < cambios.length) {
+        sinEmparejar += cambios.length - usados.size;
         warnings.push(
           `«${t.full}»: ${cambios.length - usados.size} rect(s) editado(s) no se pudieron emparejar con ningún widget del PDF.`,
         );
@@ -410,6 +418,9 @@ export async function escribirPdfRenombrado(
     creados: creados.length,
     borrados,
     movidos,
+    sinEmparejar,
+    widgets: releido.totalWidgets,
+    estados: releido.estados,
     campos: esperados,
     limpiados,
     warnings,

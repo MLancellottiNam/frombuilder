@@ -59,6 +59,20 @@ const encendido = (ns: PDFName[]) => ns.find((k) => k.asString() !== '/Off')!;
   });
   ok(res.renombrados === 1, `1 campo renombrado (got ${res.renombrados})`);
 
+  // --- lo que el reporte de pantalla muestra (v3.4.0) ----------------------
+  ok(res.widgets === 1 && res.campos === 1, `el reporte cuenta 1 campo / 1 widget (got ${res.campos}/${res.widgets})`);
+  ok(res.sinEmparejar === 0, 'ninguna caja quedó sin emparejar');
+  ok(res.estados.widgets === 1, `1 casilla con estado de exportación (got ${res.estados.widgets})`);
+  ok(res.estados.sinEstado === 0, 'ninguna casilla sin /AP/N');
+  ok(
+    JSON.stringify(res.estados.porEstado) === '{"Sí":1}',
+    `el estado en uso es «Sí»: got ${JSON.stringify(res.estados.porEstado)}`,
+  );
+  ok(
+    res.estados.escapados['Sí'] === '/S#ed',
+    `y se avisa que viene escapado: got ${JSON.stringify(res.estados.escapados)}`,
+  );
+
   const salida = await estadosDe(res.bytes);
   ok(salida.length === 2, `el /AP/N de salida sigue teniendo 2 estados (got ${salida.length})`);
 
