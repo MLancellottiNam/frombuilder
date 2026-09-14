@@ -8,6 +8,6 @@
 export const VERSION = '3.0.0';
 
 /** Etiqueta corta de lo último entregado, para el badge. */
-export const FASE = 'generador';
+export const FASE = 'Etapa 0';
 
 export const BADGE = `v${VERSION} · ${FASE}`;

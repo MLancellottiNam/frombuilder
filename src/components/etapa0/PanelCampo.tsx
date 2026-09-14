@@ -56,7 +56,7 @@ export default function PanelCampo({
 
   const patch = (p: Partial<Ediciones[number]>) =>
     setEdiciones((prev) => {
-      const b = prev[idx] ?? { nombreNuevo: '', filaIdx: null, tipo: leaf.ft, manual: false };
+      const b = prev[idx] ?? { nombreNuevo: '', tipo: leaf.ft, manual: false };
       return { ...prev, [idx]: { ...b, ...p, manual: true } };
     });
 

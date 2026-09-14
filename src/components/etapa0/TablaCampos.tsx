@@ -6,12 +6,6 @@ import type { PdfLeaf } from '../../lib/etapa0/pdfFields';
 export interface EdicionCampo {
   /** '' = no se renombra (queda el actual) */
   nombreNuevo: string;
-  /**
-   * Índice de fila de ficha. Sobrevive del flujo viejo (v1.5.0) para no romper
-   * los proyectos ya guardados; desde v2.0.0 el mapeo se resuelve afuera y esto
-   * no se usa.
-   */
-  filaIdx: number | null;
   /** override del tipo (se aplica al escribir el PDF) */
   tipo: string;
   /** true si lo tocó el usuario (para no pisarlo al importar) */
@@ -115,7 +109,7 @@ export default function TablaCampos({
 
   const patch = (i: number, p: Partial<EdicionCampo>) =>
     setEdiciones((prev) => {
-      const b = prev[i] ?? { nombreNuevo: '', filaIdx: null, tipo: leaves[i].ft, manual: false };
+      const b = prev[i] ?? { nombreNuevo: '', tipo: leaves[i].ft, manual: false };
       return { ...prev, [i]: { ...b, ...p, manual: true } };
     });
 
@@ -137,7 +131,7 @@ export default function TablaCampos({
         if (modo === 'prefijo') nuevo = bulkTexto + actual;
         else if (modo === 'sufijo') nuevo = actual + bulkTexto;
         else nuevo = actual.split(bulkTexto).join(bulkReemplazo);
-        const b = next[i] ?? { nombreNuevo: '', filaIdx: null, tipo: leaves[i].ft, manual: false };
+        const b = next[i] ?? { nombreNuevo: '', tipo: leaves[i].ft, manual: false };
         next[i] = { ...b, nombreNuevo: nuevo, manual: true };
       }
       return next;

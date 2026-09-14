@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Etapa 0 — Detector y editor de campos del PDF (v2.0.0).
+// Etapa 0 — Detector y editor de campos del PDF (v3.0.0).
 //
 // EL CAMBIO DE FOCO. Hasta v1.4.5 esta pantalla intentaba resolver el mapeo
 // ficha↔PDF sola (regiones, DP, anclas, confianza). El techo no era de
@@ -14,48 +14,49 @@
 //   2. afuera: resolver el mapeo leyendo formulario + ficha + paquete
 //   3. acá: importar los nombres y escribir el PDF renombrado
 //   4. Signframe: subir el renombrado, bajar el JSON main
-//   5. Etapa 1 / 2: esqueleto y bind 1:1
 //
-// EL PDF ES EL ÚNICO INPUT OBLIGATORIO. La ficha pasó a ser opcional y entra
-// solo para importar nombres.
+// EL PDF ES EL ÚNICO INPUT OBLIGATORIO. La ficha es opcional y entra solo para
+// presembrar columnas del paquete.
 //
-// El código de la alineación automática (`align.ts`, las regiones y anclas de
-// `regiones.ts`, `acroName.ts`, `reporte.ts`, `ModoRevision` y la pantalla vieja
-// en `Etapa0ScreenV1.tsx.bak`) queda en el repo con sus tests, pero YA NO SE
-// CABLEA desde acá.
+// En v3.0.0 la app se recortó a esta pantalla: el motor de alineación, el
+// armador manual y las etapas 1 y 2 se borraron (están en el historial de git).
+// El form-def y su validación los hace la skill, afuera.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
-  ArrowLeft,
-  ArrowRight,
   CheckCircle2,
   Download,
   FileSignature,
   FileSpreadsheet,
   FileText,
   Search,
+  Sparkles,
   Upload,
 } from 'lucide-react';
 import { nanoid } from 'nanoid';
 import { useStore } from '../../store/store';
 import { BADGE } from '../../version';
 import { Button } from '../ui';
-import { readFichaSheets } from '../../lib/etapa0/fichaRaw';
+import { buildFichaRaw, readFichaSheets, type FichaRawResult } from '../../lib/etapa0/fichaRaw';
 import { readPdfFields, type PdfFieldsResult, type PdfLeaf, type Rect } from '../../lib/etapa0/pdfFields';
-import { extraerTextoPdf, sufijosDeFormato, type TextItem } from '../../lib/etapa0/regiones';
+import { extraerTextoPdf, sufijosDeFormato, type TextItem } from '../../lib/etapa0/textoPdf';
 import { escribirPdfRenombrado } from '../../lib/etapa0/writePdf';
 import { escribirPdfConNombresImpresos } from '../../lib/etapa0/writePdfImpreso';
 import {
   candidatasDeWidget,
   construirPaquete,
+  externasPorCampo,
+  leerPaqueteAoa,
   paqueteAXlsx,
+  presembrarDesdeFicha,
   textoDeZona,
   type FilaPaquete,
 } from '../../lib/etapa0/paquete';
-import { importarColNDeFicha, importarDesdePaquete, type ResultadoImport } from '../../lib/etapa0/importarNombres';
-import { slugify } from '../../lib/exporter';
+import { derivarValidacion } from '../../lib/etapa0/validaciones';
+import { importarDesdePaquete, type ResultadoImport } from '../../lib/etapa0/importarNombres';
+import { slugify } from '../../lib/etapa0/slug';
 import {
   aplicarCambios,
   claveEstable,
@@ -82,7 +83,6 @@ function descargarBytes(bytes: Uint8Array, filename: string, mime: string): void
 }
 
 export default function Etapa0Screen() {
-  const setView = useStore((s) => s.setView);
   const pdfInput = useRef<HTMLInputElement>(null);
   const importInput = useRef<HTMLInputElement>(null);
 
@@ -98,6 +98,16 @@ export default function Etapa0Screen() {
   const [borrados, setBorrados] = useState<string[]>([]);
   const [rectsEditados, setRectsEditados] = useState<RectsEditados>({});
   const [notasImportadas, setNotasImportadas] = useState<Record<string, string>>({});
+  /** ficha leída (opcional): solo para presembrar columnas del paquete */
+  const [ficha, setFicha] = useState<FichaRawResult | null>(null);
+  const [fichaNombre, setFichaNombre] = useState('');
+  /**
+   * Columnas que la skill completó afuera, por `nombre_actual`. La app NO las
+   * interpreta: las arrastra para que el paquete pueda dar vueltas sin perder
+   * información.
+   */
+  const [externas, setExternas] = useState<Record<string, Record<string, string>>>({});
+  const [paqueteNombre, setPaqueteNombre] = useState('');
 
   const [selected, setSelected] = useState<string | null>(null);
   const [q, setQ] = useState('');
@@ -107,7 +117,12 @@ export default function Etapa0Screen() {
   const [tamanoFuente, setTamanoFuente] = useState(10);
   const [descargas, setDescargas] = useState({ pdf: false, impreso: false, paquete: false });
   /** resultado de una importación esperando confirmación */
-  const [pendiente, setPendiente] = useState<{ r: ResultadoImport; archivo: string } | null>(null);
+  const [pendiente, setPendiente] = useState<{
+    r: ResultadoImport;
+    archivo: string;
+    /** columnas que ese paquete traía completadas desde afuera */
+    externas?: Map<string, Record<string, string>>;
+  } | null>(null);
 
   const invalidarDescargas = () => setDescargas({ pdf: false, impreso: false, paquete: false });
 
@@ -236,7 +251,6 @@ export default function Etapa0Screen() {
       tipo: ediciones[i]?.tipo ?? l.ft,
       page: l.page,
       rect: r,
-      filaClave: null,
       grupo,
       parte: k + 1,
     }));
@@ -303,8 +317,13 @@ export default function Etapa0Screen() {
       texto: textoPdf,
       borrados: pdf.leaves.filter((l) => borrados.includes(l.name)),
       notaDeLeaf: (i) => notasImportadas[leaves[i].name],
+    }).map((f) => {
+      // Lo que vino completado afuera se vuelve a escribir tal cual: el archivo
+      // tiene que poder dar vueltas sin perder información.
+      const ext = externas[f.nombre_actual];
+      return ext ? { ...f, externas: { ...ext } } : f;
     });
-  }, [pdf, leaves, ediciones, textoPdf, borrados, notasImportadas]);
+  }, [pdf, leaves, ediciones, textoPdf, borrados, notasImportadas, externas]);
 
   const baseNombre = useMemo(() => slugify((pdfFile?.name ?? 'formulario').replace(/\.pdf$/i, '')), [pdfFile]);
 
@@ -415,6 +434,50 @@ export default function Etapa0Screen() {
     }
   };
 
+  /**
+   * Copia a las columnas del paquete lo que la ficha ya declara: la ruta (col M),
+   * la obligatoriedad (col H) y las validaciones (cols K y G). Es una SUGERENCIA
+   * —queda anotada en `notas`— y no pisa nada que haya vuelto de la skill.
+   */
+  const doPresembrar = () => {
+    if (!ficha || !pdf) return;
+    const copia = paquete.map((f) => ({ ...f, externas: { ...(f.externas ?? {}) } }));
+    const r = presembrarDesdeFicha(
+      copia,
+      ficha.rows.map((x) => ({
+        hoja: x.hoja,
+        fila: x.fila,
+        campoPdfInterno: x.campoPdfInterno,
+        campoJson: x.campoJson,
+        obligatorio: x.obligatorio,
+        observaciones: x.observaciones,
+        regla: x.regla,
+        label: x.label,
+        valor: x.valor,
+      })),
+      derivarValidacion,
+    );
+    if (r.tocadas === 0) {
+      setAviso(
+        'No había nada que presembrar: o la ficha no tiene col N, o esas columnas ya venían completas desde afuera (y no se pisan).' +
+          (r.avisos.length ? ' · ' + r.avisos.join(' · ') : ''),
+      );
+      return;
+    }
+    setExternas((prev) => {
+      const next = { ...prev };
+      for (const f of copia) {
+        if (!f.nombre_actual) continue;
+        const e = f.externas ?? {};
+        if (Object.keys(e).length === 0) continue;
+        next[f.nombre_actual] = { ...next[f.nombre_actual], ...e };
+      }
+      return next;
+    });
+    setDescargas((d) => ({ ...d, paquete: false }));
+    setAviso(r.avisos.join(' · '));
+  };
+
   // --- importar los nombres ------------------------------------------------
 
   const onImportar = async () => {
@@ -423,24 +486,40 @@ export default function Etapa0Screen() {
     setError(null);
     try {
       const sheets = await readFichaSheets(await f.arrayBuffer());
+      // El paquete es una hoja con `nombre_actual`/`nombre_nuevo`; la ficha son
+      // las hojas del INS. Se distingue por el CONTENIDO, no por el nombre del
+      // archivo, así el mismo botón sirve para los dos.
+      const hojaPaquete = sheets.find((sh) =>
+        sh.aoa.some((fila) => {
+          const c = fila.map((x) => String(x ?? '').trim().toLowerCase());
+          return c.includes('nombre_actual') && c.includes('nombre_nuevo');
+        }),
+      );
+
+      if (!hojaPaquete) {
+        // --- ficha: solo para presembrar columnas del paquete ---------------
+        const leida = buildFichaRaw(sheets);
+        setFicha(leida);
+        setFichaNombre(f.name);
+        const hojas = new Set(leida.rows.map((r) => r.hoja)).size;
+        setAviso(
+          `Ficha leída: ${hojas} hojas, ${leida.rows.length} filas (${leida.stats.pdf} van al PDF, ${leida.stats.excluidas} excluidas). ` +
+            'Se usa para presembrar las columnas del paquete; no cambia ningún nombre.',
+        );
+        if (importInput.current) importInput.current.value = '';
+        return;
+      }
+
       const esManual = (nombreActual: string) => {
         const i = leaves.findIndex((l) => l.name === nombreActual);
         const ed = i >= 0 ? ediciones[i] : undefined;
         return ed?.manual && ed.nombreNuevo ? ed.nombreNuevo : undefined;
       };
-      // El paquete es una hoja con `nombre_actual`/`nombre_nuevo`; la ficha son
-      // las hojas del INS con la col N. Se distingue por el contenido, no por el
-      // nombre del archivo.
-      const hojaPaquete = sheets.find((s) =>
-        s.aoa.some((fila) => {
-          const c = fila.map((x) => String(x ?? '').trim().toLowerCase());
-          return c.includes('nombre_actual') && c.includes('nombre_nuevo');
-        }),
-      );
-      const r = hojaPaquete
-        ? importarDesdePaquete(hojaPaquete.aoa, leaves, esManual)
-        : importarColNDeFicha(sheets, leaves, esManual);
-      setPendiente({ r, archivo: f.name });
+      const leido = leerPaqueteAoa(hojaPaquete.aoa);
+      const r = importarDesdePaquete(hojaPaquete.aoa, leaves, esManual);
+      r.avisos.push(...leido.avisos);
+      setPendiente({ r, archivo: f.name, externas: externasPorCampo(leido.filas) });
+      setPaqueteNombre(f.name);
     } catch (e) {
       setError('No se pudo leer el archivo: ' + String(e));
     }
@@ -458,7 +537,7 @@ export default function Etapa0Screen() {
         if (!pisarManual && pisa.has(x.nombreActual)) continue;
         const i = idxPorNombre.get(x.nombreActual);
         if (i == null) continue;
-        const b = next[i] ?? { nombreNuevo: '', filaIdx: null, tipo: leaves[i].ft, manual: false };
+        const b = next[i] ?? { nombreNuevo: '', tipo: leaves[i].ft, manual: false };
         next[i] = { ...b, nombreNuevo: x.nombreNuevo, manual: true };
       }
       return next;
@@ -469,6 +548,14 @@ export default function Etapa0Screen() {
       for (const x of r.aplicar) next[x.nombreActual] = `nombre importado de ${x.fuente}`;
       return next;
     });
+    // Y las columnas que la skill completó se guardan para devolverlas intactas.
+    if (pendiente.externas && pendiente.externas.size > 0) {
+      setExternas((prev) => {
+        const next = { ...prev };
+        for (const [nombre, cols] of pendiente.externas!) next[nombre] = { ...next[nombre], ...cols };
+        return next;
+      });
+    }
     invalidarDescargas();
     const salteados = pisarManual ? 0 : r.pisaManual.length;
     setAviso(
@@ -495,13 +582,15 @@ export default function Etapa0Screen() {
     if (g.camposCreados?.length) setCreados(g.camposCreados);
     if (g.camposBorrados?.length) setBorrados(g.camposBorrados);
     if (g.rectsEditados && Object.keys(g.rectsEditados).length) setRectsEditados(g.rectsEditados);
+    if (g.externas && Object.keys(g.externas).length) setExternas(g.externas);
+    if (g.paqueteNombre) setPaqueteNombre(g.paqueteNombre);
     if (g.ediciones && Object.keys(g.ediciones).length) {
       setEdiciones((prev) => {
         const next: Ediciones = { ...prev };
         leaves.forEach((l, i) => {
           const e = g.ediciones[l.name];
           if (!e) return;
-          next[i] = { nombreNuevo: e.nombreNuevo, filaIdx: null, tipo: e.tipo, manual: e.manual };
+          next[i] = { nombreNuevo: e.nombreNuevo, tipo: e.tipo, manual: e.manual };
         });
         return next;
       });
@@ -514,25 +603,25 @@ export default function Etapa0Screen() {
     leaves.forEach((l, i) => {
       const e = ediciones[i];
       if (!e) return;
-      eds[l.name] = { nombreNuevo: e.nombreNuevo, filaClave: null, tipo: e.tipo, manual: e.manual };
+      eds[l.name] = { nombreNuevo: e.nombreNuevo, tipo: e.tipo, manual: e.manual };
     });
     setEtapa0({
       pdfNombre: pdfFile?.name,
-      hojaInstanciable: null,
-      instancias: [],
+      fichaNombre: fichaNombre || undefined,
+      paqueteNombre: paqueteNombre || undefined,
       ediciones: eds,
       limitarFuente,
       tamanoFuente,
       pdfDescargado: descargas.pdf,
-      fichaDescargada: false,
-      reporteDescargado: descargas.paquete,
+      paqueteDescargado: descargas.paquete,
+      externas,
       camposCreados: creados,
       camposBorrados: borrados,
       rectsEditados,
     });
   }, [
     pdf, pdfFile, leaves, ediciones, limitarFuente, tamanoFuente, descargas, creados, borrados, rectsEditados,
-    setEtapa0,
+    externas, fichaNombre, paqueteNombre, setEtapa0,
   ]);
 
   // --- UI ------------------------------------------------------------------
@@ -542,11 +631,8 @@ export default function Etapa0Screen() {
   return (
     <div className="h-screen flex flex-col bg-slate-100">
       <header className="flex items-center gap-2 px-3 py-2 bg-white border-b border-slate-200 shrink-0 flex-wrap">
-        <Button onClick={() => setView('home')}>
-          <ArrowLeft size={15} /> Inicio
-        </Button>
         <span className="font-bold text-slate-800 flex items-center gap-1.5">
-          <FileSignature size={16} /> Etapa 0 · Campos del PDF
+          <FileSignature size={16} /> Campos del PDF
         </span>
         <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">{BADGE}</span>
 
@@ -567,10 +653,16 @@ export default function Etapa0Screen() {
         <Button
           onClick={() => importInput.current?.click()}
           disabled={!pdf}
-          title="Ficha con la col N llena, o el paquete de campos con nombre_nuevo"
+          title="El paquete con nombre_nuevo lleno, o la ficha del INS para presembrar columnas. Se distingue por el contenido."
+          data-cargar
         >
-          <Upload size={15} /> Cargar nombres
+          <Upload size={15} /> Cargar paquete o ficha
         </Button>
+        {ficha && (
+          <span className="text-[10px] text-slate-400 max-w-[140px] truncate" title={fichaNombre}>
+            ficha: {fichaNombre}
+          </span>
+        )}
       </header>
 
       {pdf && (
@@ -598,6 +690,11 @@ export default function Etapa0Screen() {
           <Button onClick={doDescargarPaquete} disabled={trabajando !== null} data-dl="paquete">
             <FileSpreadsheet size={14} /> {trabajando === 'paquete' ? 'Escribiendo…' : 'Paquete de campos (xlsx)'}
           </Button>
+          {ficha && (
+            <Button onClick={doPresembrar} disabled={trabajando !== null} data-presembrar title="Copia ruta_json, required y validaciones desde la ficha. Es una sugerencia y no pisa lo que vino de afuera.">
+              <Sparkles size={14} /> Presembrar desde la ficha
+            </Button>
+          )}
           <span className="text-[10px] text-slate-400">
             el impreso es para revisar · a Signframe va el renombrado
           </span>
@@ -753,7 +850,6 @@ export default function Etapa0Screen() {
             <PanelCrearCampo
               page={dibujo.page}
               rect={dibujo.rect}
-              filas={[]}
               onCrear={(d) => crearCampos(d, dibujo.rect, dibujo.page)}
               onCancelar={() => setDibujo(null)}
             />
@@ -824,12 +920,10 @@ export default function Etapa0Screen() {
               <p className="flex items-center gap-1.5 font-medium text-emerald-800">
                 <CheckCircle2 size={15} /> PDF renombrado descargado
               </p>
-              <p className="mt-1 mb-2 text-slate-600">
-                Subí <b>ESE</b> PDF a Signframe (no el original ni el de nombres impresos) y bajá el <b>JSON main</b>.
+              <p className="mt-1 text-slate-600">
+                Subí <b>ESE</b> PDF a Signframe (no el original ni el de nombres impresos) y bajá el{' '}
+                <b>JSON main</b>. El form-def se arma afuera, con el paquete y la skill.
               </p>
-              <Button onClick={() => setView('builder')} data-continuar>
-                Continuar a Etapa 1 <ArrowRight size={14} />
-              </Button>
             </div>
           )}
         </div>

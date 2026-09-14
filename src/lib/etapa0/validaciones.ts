@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Etapa 1 — Validaciones desde la col K (v3.0.0).
+// Etapa 0 — Validaciones declaradas en la ficha (v3.0.0).
 //
 // La col K («Regla») es texto libre pero muy regular. Lo que se deduce:
 //

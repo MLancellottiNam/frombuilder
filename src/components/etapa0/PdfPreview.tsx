@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Plus, ZoomIn, ZoomOut } from 'lucide-react';
 import type { PdfLeaf, Rect } from '../../lib/etapa0/pdfFields';
-import { colorRegion, type Region } from '../../lib/etapa0/regiones';
+
 import { moverRect, redimensionarRect, type Handle } from '../../lib/etapa0/rects';
 
 /** Overlay ya proyectado a píxeles del canvas. */
@@ -43,14 +43,6 @@ const HANDLES: { h: Handle; cx: number; cy: number; cursor: string }[] = [
   { h: 'w', cx: 0, cy: 0.5, cursor: 'ew-resize' },
 ];
 
-/** Banda de fondo de una región, proyectada a píxeles del canvas. */
-interface Banda {
-  codigo: string;
-  idx: number;
-  top: number;
-  height: number;
-}
-
 /** Cuadradito de color de la leyenda del overlay. */
 function Muestra({ clase, children }: { clase: string; children: React.ReactNode }) {
   return (
@@ -63,8 +55,8 @@ function Muestra({ clase, children }: { clase: string; children: React.ReactNode
 
 /**
  * Render del PDF a canvas con `pdfjs-dist` (lazy) y overlay de cada widget del
- * AcroForm con su nombre ACTUAL. Sirve para validar la lectura del AcroForm
- * antes de meter la lógica de alineación.
+ * AcroForm con su nombre final. Es el panel derecho: se ve dónde cae cada campo,
+ * se dibujan campos nuevos y se mueve o redimensiona el seleccionado.
  */
 export default function PdfPreview({
   file,
@@ -74,9 +66,6 @@ export default function PdfPreview({
   renombrado,
   nombreFinal,
   colisiones,
-  regiones,
-  regionPorLeaf,
-  escalaMinima,
   onDibujar,
   onEditarRect,
   esCreado,
@@ -95,10 +84,6 @@ export default function PdfPreview({
   nombreFinal?: Map<string, string>;
   /** nombres finales duplicados: se pintan en rojo y bloquean la descarga */
   colisiones?: Set<string>;
-  /** regiones de las instancias, para pintarlas como bandas de fondo */
-  regiones?: Region[];
-  /** leafIdx -> código de instancia */
-  regionPorLeaf?: Map<number, string>;
   /**
    * Se llama al soltar el rectángulo dibujado, con el rect ya en coordenadas
    * PDF (origen abajo-izquierda) y la página 0-based. Si no se pasa, el modo
@@ -113,12 +98,6 @@ export default function PdfPreview({
   onEditarRect?: (leaf: PdfLeaf, widgetIdx: number, rect: Rect) => void;
   /** distintivo de los campos creados a mano: borde punteado */
   esCreado?: (leafName: string) => boolean;
-  /**
-   * Zoom mínimo garantizado. El modo revisión lo sube para que se lea la
-   * etiqueta impresa alrededor del campo, que es lo que permite decidir de un
-   * vistazo si el nombre está bien.
-   */
-  escalaMinima?: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -127,7 +106,6 @@ export default function PdfPreview({
   const [pageCount, setPageCount] = useState(0);
   const [scale, setScale] = useState(1.25);
   const [boxes, setBoxes] = useState<Box[]>([]);
-  const [bandas, setBandas] = useState<Banda[]>([]);
   const [dibujando, setDibujando] = useState(false);
   const [arrastre, setArrastre] = useState<Arrastre | null>(null);
   const arrastreRef = useRef<Arrastre | null>(null);
@@ -211,37 +189,11 @@ export default function PdfPreview({
       }
       setBoxes(out);
 
-      // Bandas de región: el rango vertical que ocupan sus campos en ESTA
-      // página. Se ve de un vistazo si una región quedó corrida.
-      const bs: Banda[] = [];
-      (regiones ?? []).forEach((r, idx) => {
-        let minTop = Infinity;
-        let maxBottom = -Infinity;
-        for (let j = r.desdeLeaf; j <= r.hastaLeaf; j++) {
-          const l = leaves[j];
-          if (!l) continue;
-          for (const w of l.widgets) {
-            if (w.page !== page - 1) continue;
-            const [, y1] = viewport.convertToViewportPoint(w.rect.x, w.rect.y);
-            const [, y2] = viewport.convertToViewportPoint(w.rect.x, w.rect.y + w.rect.h);
-            minTop = Math.min(minTop, y1, y2);
-            maxBottom = Math.max(maxBottom, y1, y2);
-          }
-        }
-        if (!Number.isFinite(minTop)) return;
-        bs.push({ codigo: r.codigo, idx, top: minTop - 4, height: maxBottom - minTop + 8 });
-      });
-      setBandas(bs);
     })();
     return () => {
       cancelled = true;
     };
-  }, [page, scale, pageCount, leaves, regiones]);
-
-  // Zoom mínimo pedido por el modo revisión.
-  useEffect(() => {
-    if (escalaMinima != null) setScale((s) => (s < escalaMinima ? escalaMinima : s));
-  }, [escalaMinima]);
+  }, [page, scale, pageCount, leaves]);
 
   // Esc sale del modo dibujo y cancela el trazo en curso.
   useEffect(() => {
@@ -501,27 +453,6 @@ export default function PdfPreview({
           onMouseUp={onMouseUp}
         >
           <canvas ref={canvasRef} className="block bg-white" />
-          {bandas.map((b) => (
-            <div
-              key={b.codigo}
-              data-banda={b.codigo}
-              className="absolute left-0 right-0 pointer-events-none"
-              style={{
-                top: b.top,
-                height: b.height,
-                background: colorRegion(b.idx, 0.07),
-                borderTop: `2px solid ${colorRegion(b.idx, 0.5)}`,
-                borderBottom: `2px solid ${colorRegion(b.idx, 0.5)}`,
-              }}
-            >
-              <span
-                className="absolute right-1 top-1 rounded px-1 text-[9px] font-mono"
-                style={{ background: colorRegion(b.idx, 0.85), color: 'white' }}
-              >
-                {b.codigo}
-              </span>
-            </div>
-          ))}
           {trazo && (
             <div
               className="absolute border-2 border-brand-600 bg-brand-500/20 pointer-events-none"
@@ -563,10 +494,7 @@ export default function PdfPreview({
                 title={
                   `#${b.leaf.readingIndex} · ${b.leaf.name} · ${b.leaf.ft}` +
                   (b.leaf.widgets.length > 1 ? ` · caja ${b.widgetIdx + 1} de ${b.leaf.widgets.length}` : '') +
-                  (editable ? ' · arrastrá para mover, los tiradores para redimensionar' : '') +
-                  (regionPorLeaf?.get(b.leaf.readingIndex - 1)
-                    ? ` · región ${regionPorLeaf.get(b.leaf.readingIndex - 1)}`
-                    : '')
+                  (editable ? ' · arrastrá para mover, los tiradores para redimensionar' : '')
                 }
                 onMouseDown={(e) => (editable ? iniciarArrastre(e, b, 'mover') : undefined)}
                 onClick={() => (editable ? undefined : onSelect(b.leaf.name))}

@@ -1,250 +1,24 @@
 // ---------------------------------------------------------------------------
-// Signframe form-definition domain types.
-// These MUST match the export structure described in the spec (section 3)
-// EXACTLY. Do not rename keys.
+// Tipos de la app (v3.0.0).
+//
+// Con el recorte a Etapa 0 se fueron todos los tipos del form-definition de
+// Signframe (`Field`, `Section`, `Subsection`, `FormDefinition`, `AutoFillConcat`,
+// `RepeaterConfig`, `Condition`, `SourceMeta`…): el form-def lo genera la skill y
+// la app ya no lo modela. Lo que queda describe el trabajo de Etapa 0.
 // ---------------------------------------------------------------------------
 
-export type FieldType =
-  | 'text'
-  | 'number'
-  | 'date'
-  | 'select'
-  | 'radio'
-  | 'checkbox'
-  | 'textarea'
-  | 'repeater'
-  | 'signature';
-
-export type FieldWidth = 'full' | 'half' | 'third' | 'quarter' | 'fit';
-
-export type PrefillMode = 'optional' | 'required' | 'locked' | string;
-
-/** Preserved verbatim from an imported PDF-derived field. NOT editable. */
-export interface SourceMeta {
-  [key: string]: unknown;
-}
-
-export interface FieldOption {
-  label: string;
-  pdfValue: unknown;
-  jsonValue: unknown;
-  parentValues?: unknown;
-}
-
-// --- autoFillConcat -------------------------------------------------------
-
-export interface Transform {
-  kind: 'substring';
-  start: number;
-  end: number;
-}
-
-export interface PartCondition {
-  fieldId: string;
-  op: 'notEmpty' | 'empty' | 'equals';
-  values?: unknown; // NOTE: the key is `values` (with s) per spec 3.6
-}
-
-export type AutoFillPart =
-  | { kind: 'field'; fieldId: string; transforms?: Transform[] }
-  | { kind: 'text'; value: unknown; condition?: PartCondition }
-  | { kind: 'dateRef'; ref: 'today' | string; offsetDays?: number }
-  | {
-      kind: 'repeaterAggregate';
-      repeaterFieldId: string;
-      scope?: string;
-      subFieldIds: string[];
-      separator?: string;
-      group?: boolean;
-      groupFieldIds?: string[];
-      groupSeparator?: string;
-      subFieldLabels?: Record<string, string>;
-    }
-  | {
-      kind: 'repeaterLookup';
-      repeaterFieldId: string;
-      scope?: string;
-      subFieldId: string;
-      needles: string;
-      match?: 'equals' | string;
-      ifFound?: string;
-      ifNotFound?: string;
-    };
-
-export interface AutoFillConcat {
-  sourceFieldIds: string[];
-  separator: string;
-  parts: AutoFillPart[];
-}
-
-// --- repeater -------------------------------------------------------------
-
-export interface SlotMapping {
-  itemIndex: number;
-  subFieldId: string;
-  targetFieldId: string;
-}
-
-export interface RepeaterConfig {
-  itemLabel: string;
-  itemLabelPlural: string;
-  addButtonLabel: string;
-  minItems: number;
-  maxItems: number;
-  fields: Field[]; // sub-fields: simple id WITHOUT field_ prefix, no sourceMeta
-  slotMappings: SlotMapping[];
-  slotPattern: string | null;
-  jsonSlotPattern: string | null;
-  overflow: unknown;
-  overflowThreshold: number;
-}
-
-// --- conditions -----------------------------------------------------------
-
-export interface Condition {
-  fieldId: string;
-  operator: 'not_empty' | 'empty' | 'equals';
-  value?: string;
-}
-
-export interface ConditionGroup {
-  logic: 'and' | 'or';
-  conditions: Condition[];
-}
-
-// --- Field ----------------------------------------------------------------
-
-export interface Field {
-  id: string;
-  type: FieldType;
-  label: string;
-  required: boolean;
-  readOnly: boolean;
-  hidden: boolean | null;
-  order: number;
-  width: FieldWidth;
-  options: FieldOption[] | null;
-  optionsLayout: string;
-  sourceMeta: SourceMeta | null;
-  prefillMode: PrefillMode;
-  prefillKey: string | null;
-  salidaJSON: string | null;
-  jsonOutputPath: string | null;
-  salidaJSONSecundaria: string | null; // 2do path (ej. código + descripción)
-  jsonValueSecundario: unknown;
-  excludeFromJson: boolean;
-  conditionalVisibility: string | null;
-  conditionalRequired: string | null;
-  autoFillConcat: AutoFillConcat | null;
-  checkedPdfValue: boolean | null;
-  checkedJsonValue: unknown;
-  jsonNumberFormat: string | null;
-  jsonDateFormat: string | null;
-  defaultValue: unknown;
-  validationPattern: string | null;
-  repeaterConfig: RepeaterConfig | null;
-  // radios desdoblados
-  radioGroupLabel: string | null;
-  radioGroupFields: string[] | null;
-  sharedValue: unknown;
-  jsonValue: unknown;
-}
-
-export interface Subsection {
-  id: string;
-  title: string;
-  description: string | null;
-  instructions: string | null;
-  conditionalVisibility: string | null;
-  hidden: boolean | null;
-  order: number;
-  fields: Field[];
-}
-
-export interface ChildOrderEntry {
-  kind: 'subsection';
-  id: string;
-}
-
-export interface Section {
-  id: string;
-  title: string;
-  description: string | null;
-  instructions: string | null;
-  conditionalVisibility: string | null;
-  order: number;
-  hidden: boolean | null;
-  fields: Field[];
-  subsections: Subsection[];
-  childrenOrder: ChildOrderEntry[];
-}
-
-export interface FormDefinition {
-  sections: Section[];
-  validationRules: unknown[];
-  prefillMappings: unknown[];
-  generatedDocuments: unknown[];
-  version: number;
-  _sourcePdf?: unknown;
-}
-
-// --- Project (app state, spec section 8) ----------------------------------
-
-export type IdConvention = 'lower' | 'exact';
-
-export interface SourceField {
-  sourceName: string;
-  page?: number;
-  nativeType?: string;
-  label?: string;
-  // Sugerencias que vienen de la ficha/matriz (no obligan nada; solo guían y
-  // pre-cargan propiedades al arrastrar el campo al canvas).
-  suggestedSection?: string;
-  suggestedSubsection?: string;
-  suggestedType?: FieldType;
-  suggestedPath?: string;
-  /** true si la matriz no traía sourceName: candidato a campo de UI (sin PDF). */
-  isUiOnly?: boolean;
-}
-
-/**
- * A real PDF field from the AcroForm universe. When it comes from the Signframe
- * auto-mapped "main JSON", it carries the authoritative id and full sourceMeta
- * that must be copied verbatim so values render correctly.
- */
-export interface AcroField {
-  name: string; // sourceName
-  page?: number;
-  id?: string; // authoritative field id from the main JSON (if any)
-  type?: FieldType;
-  sourceMeta?: SourceMeta; // real sourceMeta from Signframe (copied verbatim on bind)
-}
-
+/** Proyecto guardable: el nombre y las decisiones de Etapa 0. */
 export interface Project {
   name: string;
-  sourceFields: SourceField[];
-  idConvention: IdConvention;
-  form: FormDefinition;
-  pool: string[]; // sourceNames not yet placed
-  acroForms: AcroField[]; // real PDF field names for Etapa 2 (binding)
-  etapa0?: Etapa0State; // renombrado asistido (Etapa 0), para retomarlo después
+  etapa0?: Etapa0State;
 }
 
-// --- Etapa 0: estado persistible del renombrado ----------------------------
+// --- Estado persistible de Etapa 0 ---------------------------------------
 // Los archivos (ficha .xlsx y PDF crudo) NO se guardan: solo las decisiones.
 // Al retomar, se vuelven a adjuntar y el estado se re-hidrata por nombre.
 
-export interface Etapa0Instancia {
-  codigo: string;
-  prefijo: string;
-  indice: number;
-  activa: boolean;
-}
-
 export interface Etapa0Edicion {
   nombreNuevo: string;
-  /** `hoja|fila|codigoInstancia` — estable aunque cambie el orden de las filas */
-  filaClave: string | null;
   tipo: string;
   manual: boolean;
 }
@@ -263,44 +37,29 @@ export interface Etapa0CampoCreado {
   page: number;
   /** coordenadas PDF (origen abajo-izquierda) */
   rect: { x: number; y: number; w: number; h: number };
-  /** `hoja|fila|codigoInstancia` de la fila asignada; null si quedó sin fila */
-  filaClave: string | null;
   /** uid del grupo cuando el campo salió de trocear un rect en N cajas */
   grupo?: string;
   /** posición dentro del grupo troceado (1-based) */
   parte?: number;
 }
 
-/** Región de una instancia, por NOMBRE de campo: sobrevive a un re-parseo. */
-export interface Etapa0Region {
-  codigo: string;
-  desdeNombre: string;
-  hastaNombre: string;
-  manual: boolean;
-}
-
 export interface Etapa0State {
   fichaNombre?: string;
   pdfNombre?: string;
-  hojaInstanciable: string | null;
-  /** todas las hojas del bloque repetible (raíz + hijas) */
-  hojasBloque?: string[];
-  instancias: Etapa0Instancia[];
-  /** regiones geométricas de las instancias (Fix B) */
-  regiones?: Etapa0Region[];
+  /** nombre del paquete que se cargó, si se cargó uno */
+  paqueteNombre?: string;
   /** nombre ACTUAL del campo en el PDF -> edición */
   ediciones: Record<string, Etapa0Edicion>;
   limitarFuente: boolean;
   tamanoFuente: number;
   pdfDescargado: boolean;
-  fichaDescargada: boolean;
-  reporteDescargado: boolean;
-  /** ¿el panel «Ver detalle» quedó abierto? (preferencia de UI) */
-  detalleAbierto?: boolean;
-  /** nombres ACTUALES de los campos que el usuario confirmó a mano en la revisión */
-  confirmados?: string[];
-  /** vista simple (default) vs. avanzada, con el diagnóstico del motor (v1.4.5) */
-  vistaSimple?: boolean;
+  paqueteDescargado: boolean;
+  /**
+   * Columnas que la skill completó afuera, por `nombre_actual`. Se guardan para
+   * que el paquete pueda dar vueltas sin perder información aunque se recargue
+   * la app en el medio.
+   */
+  externas?: Record<string, Record<string, string>>;
   /** campos dibujados a mano (v1.4.4) */
   camposCreados?: Etapa0CampoCreado[];
   /** nombres ACTUALES de los campos detectados que el usuario borró */

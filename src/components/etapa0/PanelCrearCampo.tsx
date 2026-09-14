@@ -1,17 +1,13 @@
 import { useState } from 'react';
 import { Check, X } from 'lucide-react';
 import type { Rect } from '../../lib/etapa0/pdfFields';
-import type { NombrePropuesto } from '../../lib/etapa0/acroName';
 import { trocearRect } from '../../lib/etapa0/camposManuales';
-import { sufijosDeFormato } from '../../lib/etapa0/regiones';
 
 export interface DatosCampoNuevo {
   nombre: string;
   tipo: string;
   /** en cuántas cajas se reparte el rect */
   dividir: number;
-  /** índice en `filasPdf`; null si se crea sin fila */
-  filaIdx: number | null;
 }
 
 const TIPOS: { valor: string; label: string }[] = [
@@ -24,49 +20,32 @@ const TIPOS: { valor: string; label: string }[] = [
  * Panel que aparece al soltar el rectángulo dibujado. La decisión del usuario es
  * el nombre, el tipo y —cuando el PDF resolvió con una caja lo que debería ser
  * varias— en cuántas cajas se reparte.
+ *
+ * En v1.5.0 este panel también elegía la fila de ficha del campo. Eso se fue con
+ * el recorte: el mapeo lo resuelve la skill sobre el paquete, así que acá el
+ * nombre se escribe o se importa.
  */
 export default function PanelCrearCampo({
   page,
   rect,
-  filas,
   onCrear,
   onCancelar,
 }: {
   /** 0-based */
   page: number;
   rect: Rect;
-  /** filas de ficha elegibles (ya filtradas por la región donde se dibujó) */
-  filas: { idx: number; np: NombrePropuesto }[];
   onCrear: (d: DatosCampoNuevo) => void;
   onCancelar: () => void;
 }) {
   const [nombre, setNombre] = useState('');
   const [tipo, setTipo] = useState('/Tx');
   const [dividir, setDividir] = useState(1);
-  const [filaIdx, setFilaIdx] = useState<number | null>(null);
-  const [busqueda, setBusqueda] = useState('');
-
-  const q = busqueda.toLowerCase();
-  const visibles = q
-    ? filas.filter((f) =>
-        `${f.np.fila.hoja} ${f.np.fila.fila} ${f.np.fila.nombrePdf} ${f.np.fila.label} ${f.np.nombre}`
-          .toLowerCase()
-          .includes(q),
-      )
-    : filas;
 
   const cajas = trocearRect(rect, dividir);
-  const filaSel = filaIdx == null ? null : filas.find((f) => f.idx === filaIdx)?.np;
-  // El sufijo sale del formato de la fila cuando se puede derivar; si no, es
-  // posicional. Es estructural y editable, no desambiguación de colisión.
-  const sufijos = filaSel ? sufijosDeFormato(filaSel.fila.valor, dividir) : undefined;
-  const base = nombre.trim() || filaSel?.nombre || '';
-  const previsualizacion =
-    dividir > 1 && base
-      ? cajas.map((_, i) => `${base}_${sufijos?.[i] ?? i + 1}`)
-      : base
-        ? [base]
-        : [];
+  const base = nombre.trim();
+  // El sufijo del troceado es posicional: es estructural y editable, no
+  // desambiguación de una colisión.
+  const previsualizacion = dividir > 1 && base ? cajas.map((_, i) => `${base}_${i + 1}`) : base ? [base] : [];
 
   const puedeCrear = !!base && dividir >= 1;
 
@@ -88,7 +67,7 @@ export default function PanelCrearCampo({
         <input
           value={nombre}
           onChange={(e) => setNombre(e.target.value)}
-          placeholder={filaSel?.nombre || 'nombre_del_campo'}
+          placeholder="nombre_del_campo"
           data-crear-nombre
           autoFocus
           className="flex-1 rounded border border-slate-300 px-2 py-1 font-mono"
@@ -130,33 +109,6 @@ export default function PanelCrearCampo({
         </span>
       </label>
 
-      <div className="flex items-start gap-2 mb-1.5">
-        <span className="w-16 text-slate-500 shrink-0 pt-1">Fila</span>
-        <div className="flex-1 min-w-0">
-          <input
-            value={busqueda}
-            onChange={(e) => setBusqueda(e.target.value)}
-            placeholder={`Buscar entre ${filas.length} filas…`}
-            className="w-full rounded border border-slate-300 px-2 py-1 mb-1"
-          />
-          <select
-            value={filaIdx ?? ''}
-            onChange={(e) => setFilaIdx(e.target.value === '' ? null : Number(e.target.value))}
-            data-crear-fila
-            size={4}
-            className="w-full rounded border border-slate-300 px-1 py-0.5"
-          >
-            <option value="">— sin fila (se reporta como huérfano) —</option>
-            {visibles.map((f) => (
-              <option key={f.idx} value={f.idx}>
-                {f.np.fila.hoja}·{f.np.fila.fila} {f.np.fila.nombrePdf || f.np.fila.label}
-                {f.np.fila.instancia ? ` (${f.np.fila.instancia.codigo})` : ''}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
       {previsualizacion.length > 0 && (
         <p className="text-[11px] text-slate-500 mb-2">
           Se {previsualizacion.length > 1 ? 'crean' : 'crea'}:{' '}
@@ -166,7 +118,7 @@ export default function PanelCrearCampo({
 
       <div className="flex gap-1.5">
         <button
-          onClick={() => onCrear({ nombre: base, tipo, dividir, filaIdx })}
+          onClick={() => onCrear({ nombre: base, tipo, dividir })}
           disabled={!puedeCrear}
           data-crear-confirmar
           className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-3 py-1.5 text-white disabled:opacity-40"

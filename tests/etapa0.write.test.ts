@@ -1,13 +1,12 @@
-// Test de v1.5.0 — escritura del PDF renombrado, ficha con col N y reporte.
-// Todo sobre fixtures sintéticos: no hace falta el material del cliente.
+// Test de la escritura del PDF renombrado.
+// La ficha con col N y el reporte CSV eran de v1.5.0 y se borraron con el
+// recorte a Etapa 0 (v3.0.0): la ficha ya no se reescribe —la col N la llena la
+// skill— y el reporte lo reemplazó el paquete de campos, que tiene su propio
+// test. Lo que queda acá es lo que sigue vivo: el PDF.
 
 import { PDFDocument, PDFName, PDFDict, PDFArray, PDFString } from 'pdf-lib';
 import { readPdfFields } from '../src/lib/etapa0/pdfFields';
 import { escribirPdfRenombrado, capDA } from '../src/lib/etapa0/writePdf';
-import { detectarAvisosColM, escribirFichaConColN } from '../src/lib/etapa0/writeFicha';
-import { construirReporte } from '../src/lib/etapa0/reporte';
-import { buildFichaRaw, type FichaRow } from '../src/lib/etapa0/fichaRaw';
-import type { NombrePropuesto } from '../src/lib/etapa0/acroName';
 
 let fail = 0;
 const ok = (c: boolean, m: string) => {
@@ -44,23 +43,6 @@ async function buildPdf(): Promise<Uint8Array> {
 }
 
 /** Hoja de ficha mínima con el header de 14 columnas. */
-function hojaFicha(): string[][] {
-  const header = [
-    'Pasos Formulario', 'Sección', 'Nombre en PDF', 'Nombre del campo en formulario', 'Tipo de dato',
-    'Valor', 'Regla', 'Obligatorio', 'Formulario a visualizar', 'Visualización en Formularios',
-    'Observaciones', 'Nombre de la sección del JSON', 'Nombre del campo en el JSON',
-    'Nombre interno del campo en PDF',
-  ];
-  const fila = (nombrePdf: string, campoJson: string) =>
-    ['1', 'Datos', nombrePdf, nombrePdf, 'Texto', '', '', 'Si', 'CSC', '', '', 'personas', campoJson, ''];
-  return [
-    header,
-    fila('Nombre completo', 'personas.nombreCompleto'),
-    fila('Tipo de identificación', 'personas.TipoIdentificacion'),
-    fila('Fecha de constitución', 'personas.fechaConstitución'),
-    fila('Otro nombre', 'personas.nombrecompleto'),
-  ];
-}
 
 (async () => {
   // --- capDA -------------------------------------------------------------
@@ -141,82 +123,6 @@ function hojaFicha(): string[][] {
     tiro2 = String(e);
   }
   ok(/duplicados/.test(tiro2), 'también detecta la colisión contra un campo sin renombrar');
-
-  // --- avisos de la col M -------------------------------------------------
-  const ficha = buildFichaRaw([{ name: 'personas', aoa: hojaFicha() }]);
-  ok(ficha.rows.length === 4, `4 filas de ficha (got ${ficha.rows.length})`);
-  const avisos = detectarAvisosColM(ficha.rows);
-  const tipos = new Set(avisos.map((a) => a.tipo));
-  ok(tipos.has('mayuscula-inicial'), 'detecta TipoIdentificacion (mayúscula inicial)');
-  ok(tipos.has('no-ascii'), 'detecta fechaConstitución (acento)');
-  ok(tipos.has('grafia-inconsistente'), 'detecta nombreCompleto vs nombrecompleto');
-  ok(
-    avisos.every((a) => a.hoja === 'personas' && a.fila >= 2),
-    'cada aviso apunta a hoja y fila reales',
-  );
-
-  // --- escritura de la ficha ---------------------------------------------
-  const XLSX = await import('xlsx');
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(hojaFicha()), 'personas');
-  const xlsxBytes = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
-
-  const colN = ficha.sheets[0].colCampoPdfInterno;
-  ok(colN === 13, `col N detectada en el índice 13 (got ${colN})`);
-  const valores = new Map([
-    ['personas', new Map([[2, 'nombre_completo'], [3, 'tipo_identificacion, tipo_identificacion_2']])],
-  ]);
-  const escrita = await escribirFichaConColN(xlsxBytes, valores, {
-    colPorHoja: new Map([['personas', colN]]),
-  });
-  ok(escrita.celdasEscritas === 2, `2 celdas escritas (got ${escrita.celdasEscritas})`);
-
-  const releida = XLSX.read(escrita.bytes, { type: 'array' });
-  const aoa = XLSX.utils.sheet_to_json<string[]>(releida.Sheets['personas'], { header: 1, defval: '', raw: false });
-  ok(String(aoa[1][13]) === 'nombre_completo', `fila 2 col N = nombre_completo (got "${aoa[1][13]}")`);
-  ok(
-    String(aoa[2][13]) === 'tipo_identificacion, tipo_identificacion_2',
-    `fila 3 col N con relación 1:N (got "${aoa[2][13]}")`,
-  );
-  ok(String(aoa[3][13] ?? '') === '', 'la fila no asignada queda con col N vacía');
-  ok(String(aoa[1][2]) === 'Nombre completo', 'el resto de la fila queda intacto');
-
-  // --- reporte ------------------------------------------------------------
-  const np = (r: FichaRow): NombrePropuesto => ({
-    fila: { ...r, instancia: null, indiceInstancia: null },
-    nombre: 'x',
-    colision: false,
-    partes: { prefijo: '', base: 'x', sufijo: '' },
-  });
-  const rep = construirReporte({
-    leaves: despues.leaves,
-    nombreFinal: (i) => despues.leaves[i].name,
-    filaDeLeaf: (i) => (i === 0 ? np(ficha.rows[0]) : null),
-    confianzaDeLeaf: (i) => (i === 0 ? 'alta' : undefined),
-    motivosDeLeaf: () => ['posición consistente entre vecinos alineados'],
-    huerfanosFicha: [np(ficha.rows[1])],
-    colisiones: new Set<string>(['padre.hijo']),
-    avisosColM: avisos,
-    origenDeLeaf: (i) => (i === 2 ? 'creado' : 'detectado'),
-    borradosDelPdf: ['un_campo_borrado'],
-  });
-  ok(rep.resumen.asignados === 1, `reporte: 1 asignado (got ${rep.resumen.asignados})`);
-  ok(rep.resumen.huerfanosPdf === 2, `reporte: 2 huérfanos PDF (got ${rep.resumen.huerfanosPdf})`);
-  ok(rep.resumen.huerfanosFicha === 1, 'reporte: 1 huérfano ficha');
-  ok(rep.resumen.colisiones === 1, 'reporte: 1 colisión');
-  ok(rep.resumen.avisos === avisos.length, 'reporte: todos los avisos de col M');
-  ok(rep.csv.split('\n')[0].startsWith('seccion,origen,nombre_actual,nombre_nuevo'), 'CSV con header esperado');
-  ok(rep.filas.some((f) => f.seccion === 'nota' && /\/Sig/.test(f.detalle)), 'reporte: nota de ausencia de /Sig');
-  ok(rep.resumen.borrados === 1, 'reporte: cuenta los campos borrados');
-  ok(
-    rep.filas.some((f) => f.seccion === 'borrado' && f.nombre_actual === 'un_campo_borrado'),
-    'reporte: el campo borrado sale con su sección',
-  );
-  ok(rep.filas.some((f) => f.origen === 'creado'), 'reporte: los creados se distinguen por origen');
-  ok(
-    rep.filas.some((f) => f.seccion === 'asignado' && f.detalle.includes('COLISIÓN')),
-    'reporte: marca la colisión en la fila del campo',
-  );
 
   console.log(fail === 0 ? '\nOK — todos los asserts pasaron' : `\n${fail} assert(s) fallaron`);
   process.exit(fail === 0 ? 0 : 1);
