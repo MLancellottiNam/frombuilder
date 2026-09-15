@@ -160,6 +160,24 @@ nombres únicos.
 Los renombrados circulares (A→B y B→A) **no necesitan nombre intermedio**: el renombre se
 aplica sobre la identidad del objeto, no sobre una tabla por nombre.
 
+**El renombrado sólo toca `/T`** (v3.2.0). `/AP`, `/AS`, `/DA`, `/MK`, `/FT` y `/Ff` salen
+byte por byte como entraron; la única excepción declarada es el `/AS /Off` de los botones.
+Lo garantiza `pdfNames.ts`, que envuelve `PDFName.of` —el único camino por el que el parser
+de pdf-lib crea names— porque su `decodeName` usa `/#([\dABCDEF]{2})/g`: **hex sólo en
+mayúscula**. Un `/S#ed` («Sí», que es como escribe los estados de exportación el generador
+del INS) no se des-escapaba, quedaba como el string literal `S#ed` y al guardar salía
+`/S#23ed`. En el D0714 eso dejaba las 25 casillas imposibles de marcar: el estado que
+Signframe escribe en `/V` no existía en el `/AP`. No lo rompía nuestro código —nunca
+escribimos `/AP`—: lo rompía leer y volver a escribir. El arreglo des-escapa el hex en
+cualquier caso y deja la instancia emitiendo los bytes exactos del archivo. Sin tabla de
+reemplazos y sin caso especial.
+
+`writePdf` devuelve además el **reporte** (v3.4.0): campos, widgets, renombrados, cajas sin
+emparejar y los **estados de exportación** del PDF generado. La pantalla los muestra con un
+WARNING cuando hay más de un estado distinto de `/Off`, cuando alguno no es ASCII (dice el
+texto y su escapado) o cuando una casilla no tiene `/AP/N`. Es el dato que del otro lado se
+configura como `checkedPdfValue`.
+
 ### 5.6 Las tres descargas
 
 1. **PDF renombrado** — el que se sube a Signframe.
@@ -240,7 +258,12 @@ Sobre el **CSC** (`BUC_Formulario_Conozca_Cliente_Homologado.pdf`, 111 campos / 
 - **PDF renombrado, releído**: **114 campos, 114 nombres únicos, 0 duplicados, 0 sin
   renombrar, 0 con acento/espacio/punto, 0 con `/V`**, el `/Sig` creado presente y el campo
   borrado ausente.
-- **Suite**: 8 suites, **235 asserts**, 0 SKIP local. `npm run build` limpio.
+- **Estados de exportación** (v3.3.0): renombrando los 111 campos, **690 claves no tocables
+  intactas** widget por widget. El CSC no tiene estados escapados, así que la anti-regresión
+  corre además sobre un **fixture sintético** (`tests/helpers/pdfCasilla.ts`: casilla con
+  estado «Sí» en hex minúscula) que sí reproduce el bug del D0714. Los 4 PDFs de Equipo
+  Electrónico no están en `fixtures/` y el test se saltea nombrándolos.
+- **Suite**: 10 suites, **266 asserts**, 0 SKIP local. `npm run build` limpio.
 
 El **fixture de ficha** (`tests/fixtures/ficha-sintetica-col-n.xlsx`) es **sintético y
 commiteado**: tiene la misma forma que la del INS —hojas de nodo, índice «Estructura base

@@ -16,6 +16,7 @@
 
 // Type-only: TypeScript los borra al compilar, así que pdf-lib sigue siendo lazy.
 import type { PDFDict as TPDFDict, PDFRef as TPDFRef } from 'pdf-lib';
+import { parcharNamesPdfLib } from './pdfNames';
 
 export interface Rect {
   /** esquina inferior izquierda (coordenadas PDF, origen abajo-izquierda) */
@@ -63,6 +64,24 @@ export interface PdfLeaf {
   uid?: string;
 }
 
+/**
+ * Estados de exportación de las casillas y radios del PDF (v3.4.0).
+ *
+ * Es el dato que hay que configurar como `checkedPdfValue` en Signframe: si el
+ * estado no es el que el /AP declara, la casilla queda en /Off aunque el PDF
+ * esté bien renombrado. Se reporta para que se vea, no se corrige solo.
+ */
+export interface EstadosExportacion {
+  /** widgets /Btn con /AP/N */
+  widgets: number;
+  /** widgets /Btn sin /AP/N: no se pueden marcar de ninguna manera */
+  sinEstado: number;
+  /** estado decodificado -> cantidad de widgets que lo ofrecen (sin contar Off) */
+  porEstado: Record<string, number>;
+  /** estados que el archivo escribe escapados (`/S#ed`), con su literal */
+  escapados: Record<string, string>;
+}
+
 export interface PdfFieldsResult {
   leaves: PdfLeaf[];
   pageCount: number;
@@ -72,6 +91,7 @@ export interface PdfFieldsResult {
   /** campos /Tx con más de un widget (colisiones sospechosas, §11.1) */
   sospechosos: PdfLeaf[];
   totalWidgets: number;
+  estados: EstadosExportacion;
   warnings: string[];
 }
 
@@ -91,6 +111,7 @@ export function compareReadingOrder(a: { page: number; rect: Rect }, b: { page: 
  */
 export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<PdfFieldsResult> {
   const { PDFDocument, PDFName, PDFDict, PDFArray, PDFString, PDFHexString, PDFNumber, PDFRef } = await import('pdf-lib');
+  parcharNamesPdfLib(PDFName);
   const warnings: string[] = [];
 
   const doc = await PDFDocument.load(data, { ignoreEncryption: true, updateMetadata: false, throwOnInvalidObject: false });
@@ -126,6 +147,28 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
     const x2 = n(2);
     const y2 = n(3);
     return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+  };
+
+  const estados: EstadosExportacion = { widgets: 0, sinEstado: 0, porEstado: {}, escapados: {} };
+  /** Anota los estados de exportación de un widget de botón. */
+  const anotarEstados = (w: TPDFDict, ft: FieldType) => {
+    if (ft !== '/Btn') return;
+    const ap = w.lookupMaybe(PDFName.of('AP'), PDFDict);
+    const n = ap?.lookupMaybe(PDFName.of('N'), PDFDict);
+    const claves = n?.keys() ?? [];
+    if (claves.length === 0) {
+      estados.sinEstado++;
+      return;
+    }
+    estados.widgets++;
+    for (const k of claves) {
+      const texto = k.decodeText();
+      if (texto === 'Off') continue;
+      estados.porEstado[texto] = (estados.porEstado[texto] ?? 0) + 1;
+      // `asString()` es lo que va al archivo: si trae `#`, el estado no es ASCII
+      // y hay que tener cuidado con lo que se configura del otro lado.
+      if (k.asString().includes('#')) estados.escapados[texto] = k.asString();
+    }
   };
 
   // campos crudos; readingIndex/paginas/multiWidgetSospechoso se calculan al final
@@ -182,6 +225,7 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
           const rect = readRect(kd);
           if (!rect) continue;
           const page = k instanceof PDFRef ? annotPage.get(k.toString()) ?? 0 : 0;
+          anotarEstados(kd, ft);
           widgets.push({ page, rect });
         }
         if (widgets.length === 0) {
@@ -206,6 +250,7 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
       return;
     }
     const page = ref ? annotPage.get(ref.toString()) ?? 0 : 0;
+    anotarEstados(dict, ft);
     leaves.push({ name: full, ft, page, rect, widgets: [{ page, rect }] });
   };
 
@@ -243,6 +288,26 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
         sospechosos.map((l) => `${l.name} ×${l.widgets.length} [p${l.paginas.map((p) => p + 1).join(',')}]`).join(' · '),
     );
   }
+  const noOff = Object.keys(estados.porEstado);
+  if (noOff.length > 1) {
+    warnings.push(
+      `Las casillas no usan un único estado de exportación: ${noOff
+        .map((e) => `«${e}» ×${estados.porEstado[e]}`)
+        .join(' · ')}. Signframe necesita saber cuál va en cada una.`,
+    );
+  }
+  const escapados = Object.entries(estados.escapados);
+  if (escapados.length > 0) {
+    warnings.push(
+      `Estado(s) de exportación con caracteres no ASCII: ${escapados
+        .map(([texto, lit]) => `«${texto}» (en el archivo: ${lit})`)
+        .join(' · ')}. El valor a configurar es el de las comillas, no el escapado.`,
+    );
+  }
+  if (estados.sinEstado > 0) {
+    warnings.push(`${estados.sinEstado} casilla(s) sin /AP/N: no se pueden marcar.`);
+  }
+
   const sigs = ordered.filter((l) => l.ft === '/Sig').length;
   if (sigs === 0) warnings.push('El PDF no tiene campos de firma (/Sig): las firmas serán líneas dibujadas.');
 
@@ -253,6 +318,7 @@ export async function readPdfFields(data: ArrayBuffer | Uint8Array): Promise<Pdf
     duplicados,
     sospechosos,
     totalWidgets: ordered.reduce((n, l) => n + l.widgets.length, 0),
+    estados,
     warnings,
   };
 }

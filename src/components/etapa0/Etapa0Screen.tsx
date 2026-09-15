@@ -42,7 +42,7 @@ import { Button } from '../ui';
 import { buildFichaRaw, readFichaSheets, type FichaRawResult } from '../../lib/etapa0/fichaRaw';
 import { readPdfFields, type PdfFieldsResult, type PdfLeaf, type Rect } from '../../lib/etapa0/pdfFields';
 import { extraerTextoPdf, sufijosDeFormato, type TextItem } from '../../lib/etapa0/textoPdf';
-import { escribirPdfRenombrado } from '../../lib/etapa0/writePdf';
+import { escribirPdfRenombrado, type WritePdfResult } from '../../lib/etapa0/writePdf';
 import { escribirPdfConNombresImpresos } from '../../lib/etapa0/writePdfImpreso';
 import {
   candidatasDeWidget,
@@ -69,6 +69,7 @@ import TablaCampos, { nombreEfectivo, FILTROS, type Ediciones, type FiltroCampos
 import PanelCampo from './PanelCampo';
 import PanelCrearCampo, { type DatosCampoNuevo } from './PanelCrearCampo';
 import PdfPreview from './PdfPreview';
+import ReporteEscritura from './ReporteEscritura';
 
 function descargarBytes(bytes: Uint8Array, filename: string, mime: string): void {
   const blob = new Blob([bytes.slice()], { type: mime });
@@ -91,6 +92,8 @@ export default function Etapa0Screen() {
   const [textoPdf, setTextoPdf] = useState<TextItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [aviso, setAviso] = useState<string | null>(null);
+  /** Qué salió en el último PDF generado (v3.4.0). */
+  const [reporte, setReporte] = useState<WritePdfResult | null>(null);
   const [trabajando, setTrabajando] = useState<string | null>(null);
 
   const [ediciones, setEdiciones] = useState<Ediciones>({});
@@ -367,12 +370,9 @@ export default function Etapa0Screen() {
       const r = await escribirPdfRenombrado(await pdfFile.arrayBuffer(), renombres, opts);
       descargarBytes(r.bytes, `${baseNombre}-renombrado.pdf`, 'application/pdf');
       setDescargas((d) => ({ ...d, pdf: true }));
+      setReporte(r);
       setAviso(
-        `PDF renombrado: ${r.renombrados} de ${r.campos} campos renombrados` +
-          (r.creados ? `, ${r.creados} creados` : '') +
-          (r.borrados ? `, ${r.borrados} borrados` : '') +
-          (r.movidos ? `, ${r.movidos} cajas movidas` : '') +
-          '.' +
+        `PDF renombrado: ${r.renombrados} de ${r.campos} campos renombrados.` +
           (r.warnings.length ? ' · ' + r.warnings.join(' · ') : ''),
       );
     } catch (e) {
@@ -744,6 +744,8 @@ export default function Etapa0Screen() {
               {aviso}
             </p>
           )}
+
+          {reporte && <ReporteEscritura r={reporte} />}
 
           {/* Resultado de una importación, esperando confirmación */}
           {pendiente && (
