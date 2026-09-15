@@ -29,7 +29,10 @@ export async function pdfConCasilla(caso: 'minuscula' | 'mayuscula'): Promise<Ui
     Type: PDFName.of('Annot'),
     Subtype: PDFName.of('Widget'),
     FT: PDFName.of('Btn'),
-    T: PDFString.of('casilla'),
+    // /T con acento a propósito: es un PDFString, no un name, así que NO usa
+    // escapes `#xx` y el bug de los estados no lo puede haber tocado. El test
+    // lo verifica para que no haya que volver a razonarlo.
+    T: PDFString.of('Casilla de verificación'),
     Rect: ctx.obj([50, 200, 62, 212]),
     F: ctx.obj(4),
     P: page.ref,

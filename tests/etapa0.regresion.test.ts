@@ -126,6 +126,16 @@ async function revisar(nombre: string, data: Uint8Array) {
       (distintas.length ? `; ${distintas.length} cambiaron:\n    ` + distintas.slice(0, 6).join('\n    ') : ''),
   );
 
+  // Los nombres de campo salen de /T (PDFString), no de un name: si alguno
+  // apareciera con un `#` de más, sería el mismo bug filtrándose a la columna
+  // `nombre_actual` del paquete.
+  const conHash = leido.leaves.filter((l) => l.name.includes('#'));
+  ok(
+    conHash.length === 0,
+    `${nombre}: ningún nombre de campo con \`#\` (nombre_actual del paquete)` +
+      (conHash.length ? ': ' + conHash.slice(0, 4).map((l) => l.name).join(' · ') : ''),
+  );
+
   // Y el detalle que motivó todo: ningún estado de exportación con `#23`.
   // Hace falta aparte porque la comparación de arriba lee las dos puntas con el
   // mismo lente: si la corrupción pasara en la lectura, entrada y salida se

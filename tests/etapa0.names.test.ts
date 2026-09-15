@@ -52,9 +52,16 @@ const encendido = (ns: PDFName[]) => ns.find((k) => k.asString() !== '/Off')!;
   const leido = await readPdfFields(original);
   ok(leido.leaves.length === 1, `se detecta 1 campo (got ${leido.leaves.length})`);
   ok(leido.leaves[0]?.ft === '/Btn', 'y es un /Btn');
+  // `nombre_actual` del paquete es exactamente este valor. Sale de /T, que es un
+  // PDFString: otro camino de pdf-lib, sin `#xx`. El bug de los names no lo
+  // podía ensuciar, y este assert lo deja fijo.
+  ok(
+    leido.leaves[0]?.name === 'Casilla de verificación',
+    `el nombre del campo se lee con su acento y sin ningún #: got «${leido.leaves[0]?.name}»`,
+  );
 
   // --- el renombrado no puede tocar el estado ------------------------------
-  const res = await escribirPdfRenombrado(original, new Map([['casilla', 'chk_acepta']]), {
+  const res = await escribirPdfRenombrado(original, new Map([['Casilla de verificación', 'chk_acepta']]), {
     limitarFuente: true,
   });
   ok(res.renombrados === 1, `1 campo renombrado (got ${res.renombrados})`);
@@ -102,7 +109,7 @@ const encendido = (ns: PDFName[]) => ns.find((k) => k.asString() !== '/Off')!;
   // --- el caso en mayúscula tampoco se puede mover -------------------------
   const may = await pdfConCasilla('mayuscula');
   ok(latin1(may).includes('/S#ED'), 'el segundo fixture trae /S#ED en mayúscula');
-  const resMay = await escribirPdfRenombrado(may, new Map([['casilla', 'chk_acepta']]), {});
+  const resMay = await escribirPdfRenombrado(may, new Map([['Casilla de verificación', 'chk_acepta']]), {});
   const onMay = encendido(await estadosDe(resMay.bytes));
   ok(onMay.asString() === '/S#ED', `el hex en mayúscula se respeta tal cual: got ${onMay.asString()}`);
 

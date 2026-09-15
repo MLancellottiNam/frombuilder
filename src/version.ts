@@ -5,7 +5,7 @@
 // mano (importar el JSON desde el bundle traería todo el manifiesto al cliente).
 // ---------------------------------------------------------------------------
 
-export const VERSION = '3.4.0';
+export const VERSION = '3.4.1';
 
 /** Etiqueta corta de lo último entregado, para el badge. */
 export const FASE = 'Etapa 0';
